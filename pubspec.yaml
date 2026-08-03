@@ -34,6 +34,9 @@ dependencies:
   provider: ^6.1.2
   uuid: ^4.4.2
 
+  # Graphiques (statistiques des versements)
+  fl_chart: ^0.69.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

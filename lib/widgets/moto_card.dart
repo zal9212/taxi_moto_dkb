@@ -8,7 +8,7 @@ import '../utils/formatters.dart';
 
 class MotoCard extends StatelessWidget {
   final Moto moto;
-  final double soldeRestant;
+  final double totalVerse;
   final Versement? prochainVersement;
   final String devise;
   final VoidCallback onTap;
@@ -16,7 +16,7 @@ class MotoCard extends StatelessWidget {
   const MotoCard({
     super.key,
     required this.moto,
-    required this.soldeRestant,
+    required this.totalVerse,
     required this.prochainVersement,
     required this.devise,
     required this.onTap,
@@ -25,7 +25,7 @@ class MotoCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final estEnRetard = prochainVersement?.statut == AppConstants.versementEnRetard;
-    final estSoldee = moto.statut == AppConstants.motoSoldee;
+    final estInactive = moto.statut != AppConstants.motoActive;
 
     return InkWell(
       onTap: onTap,
@@ -49,18 +49,18 @@ class MotoCard extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
-                _badgeStatut(estSoldee, estEnRetard),
+                _badgeStatut(estInactive, estEnRetard),
               ],
             ),
             const SizedBox(height: 10),
-            Text('Solde restant', style: TextStyle(color: AppColors.texteGris, fontSize: 10)),
+            Text('Total encaisse', style: TextStyle(color: AppColors.texteGris, fontSize: 10)),
             const SizedBox(height: 2),
             Text(
-              formaterMontant(soldeRestant, devise),
+              formaterMontant(totalVerse, devise),
               style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
             ),
             const SizedBox(height: 8),
-            if (prochainVersement != null && !estSoldee)
+            if (prochainVersement != null && !estInactive)
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
@@ -80,15 +80,15 @@ class MotoCard extends StatelessWidget {
     );
   }
 
-  Widget _badgeStatut(bool estSoldee, bool estEnRetard) {
+  Widget _badgeStatut(bool estInactive, bool estEnRetard) {
     late Color fond;
     late Color texte;
     late String libelle;
 
-    if (estSoldee) {
-      fond = AppColors.succesFond;
-      texte = AppColors.succes;
-      libelle = 'Solde';
+    if (estInactive) {
+      fond = AppColors.bordure;
+      texte = AppColors.texteGris;
+      libelle = moto.statut == AppConstants.motoSuspendue ? 'Suspendu' : 'Archive';
     } else if (estEnRetard) {
       fond = AppColors.dangerFond;
       texte = AppColors.danger;

@@ -101,53 +101,62 @@ class _LockScreenState extends State<LockScreen> {
     return Scaffold(
       backgroundColor: AppColors.carteNoire,
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            children: [
-              const Spacer(),
-              const Icon(Icons.motorcycle, color: AppColors.accentLime, size: 48),
-              const SizedBox(height: 16),
-              const Text('Moto Taxi Douka',
-                  style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600)),
-              const SizedBox(height: 4),
-              Text(
-                _erreur ? 'Code incorrect, reessayez' : 'Entrez votre code',
-                style: TextStyle(
-                  color: _erreur ? AppColors.danger : AppColors.texteGris,
-                  fontSize: 13,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            return SingleChildScrollView(
+              padding: const EdgeInsets.all(24),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minHeight: constraints.maxHeight - 48),
+                child: IntrinsicHeight(
+                  child: Column(
+                    children: [
+                      const Spacer(),
+                      const Icon(Icons.motorcycle, color: AppColors.accentLime, size: 48),
+                      const SizedBox(height: 16),
+                      const Text('Moto Taxi Douka',
+                          style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600)),
+                      const SizedBox(height: 4),
+                      Text(
+                        _erreur ? 'Code incorrect, reessayez' : 'Entrez votre code',
+                        style: TextStyle(
+                          color: _erreur ? AppColors.danger : AppColors.texteGris,
+                          fontSize: 13,
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: List.generate(4, (i) {
+                          final rempli = i < _saisie.length;
+                          return Container(
+                            margin: const EdgeInsets.symmetric(horizontal: 8),
+                            width: 14,
+                            height: 14,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: rempli ? AppColors.accentLime : Colors.transparent,
+                              border: Border.all(color: AppColors.accentLime, width: 1.4),
+                            ),
+                          );
+                        }),
+                      ),
+                      const Spacer(),
+                      if (_biometrieActive)
+                        TextButton.icon(
+                          onPressed: _tenterBiometrie,
+                          icon: const Icon(Icons.fingerprint, color: AppColors.accentLime),
+                          label: const Text('Utiliser empreinte / Face ID',
+                              style: TextStyle(color: AppColors.accentLime)),
+                        ),
+                      const SizedBox(height: 12),
+                      _clavierNumerique(),
+                      const SizedBox(height: 12),
+                    ],
+                  ),
                 ),
               ),
-              const SizedBox(height: 24),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: List.generate(4, (i) {
-                  final rempli = i < _saisie.length;
-                  return Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 8),
-                    width: 14,
-                    height: 14,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: rempli ? AppColors.accentLime : Colors.transparent,
-                      border: Border.all(color: AppColors.accentLime, width: 1.4),
-                    ),
-                  );
-                }),
-              ),
-              const Spacer(),
-              if (_biometrieActive)
-                TextButton.icon(
-                  onPressed: _tenterBiometrie,
-                  icon: const Icon(Icons.fingerprint, color: AppColors.accentLime),
-                  label: const Text('Utiliser empreinte / Face ID',
-                      style: TextStyle(color: AppColors.accentLime)),
-                ),
-              const SizedBox(height: 12),
-              _clavierNumerique(),
-              const SizedBox(height: 12),
-            ],
-          ),
+            );
+          },
         ),
       ),
     );

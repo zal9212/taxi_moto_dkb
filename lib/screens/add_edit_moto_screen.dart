@@ -3,14 +3,14 @@ import 'package:flutter/material.dart';
 import '../core/constants.dart';
 import '../core/theme.dart';
 import '../models/moto.dart';
-import '../models/versement.dart';
 import '../services/database_service.dart';
 import '../services/notification_service.dart';
-import '../services/schedule_service.dart';
 
 /// Formulaire de création/édition d'une moto. Rien n'est en liste fermée :
 /// la fréquence propose 3 modes (hebdomadaire / mensuelle / personnalisée)
-/// et chacun a son propre paramètre libre.
+/// et chacun a son propre paramètre libre. Il n'y a pas de montant total à
+/// rembourser : le versement est récurrent et indéfini tant que la moto
+/// est active.
 class AddEditMotoScreen extends StatefulWidget {
   final Moto? motoExistante;
   const AddEditMotoScreen({super.key, this.motoExistante});
@@ -25,7 +25,6 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
 
   late final TextEditingController _nomCtrl;
   late final TextEditingController _chauffeurCtrl;
-  late final TextEditingController _montantTotalCtrl;
   late final TextEditingController _montantVersementCtrl;
   late final TextEditingController _notesCtrl;
 
@@ -45,7 +44,6 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
     final m = widget.motoExistante;
     _nomCtrl = TextEditingController(text: m?.nom ?? '');
     _chauffeurCtrl = TextEditingController(text: m?.chauffeur ?? '');
-    _montantTotalCtrl = TextEditingController(text: m?.montantTotal.toStringAsFixed(0) ?? '');
     _montantVersementCtrl = TextEditingController(text: m?.montantVersement.toStringAsFixed(0) ?? '');
     _notesCtrl = TextEditingController(text: m?.notes ?? '');
 
@@ -84,50 +82,54 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _enregistrement = true);
 
-    final montantTotal = double.parse(_montantTotalCtrl.text.replaceAll(' ', ''));
-    final montantVersement = double.parse(_montantVersementCtrl.text.replaceAll(' ', ''));
+    try {
+      final montantVersement = double.parse(_montantVersementCtrl.text.replaceAll(' ', ''));
 
-    final moto = Moto(
-      id: widget.motoExistante?.id,
-      nom: _nomCtrl.text.trim(),
-      chauffeur: _chauffeurCtrl.text.trim(),
-      montantTotal: montantTotal,
-      montantVersement: montantVersement,
-      frequenceType: _frequenceType,
-      frequenceValeur: _frequenceValeur,
-      dateDebut: _dateDebut,
-      statut: _statut,
-      dateCreation: widget.motoExistante?.dateCreation,
-      notes: _notesCtrl.text.trim().isEmpty ? null : _notesCtrl.text.trim(),
-    );
+      final moto = Moto(
+        id: widget.motoExistante?.id,
+        nom: _nomCtrl.text.trim(),
+        chauffeur: _chauffeurCtrl.text.trim(),
+        montantVersement: montantVersement,
+        frequenceType: _frequenceType,
+        frequenceValeur: _frequenceValeur,
+        dateDebut: _dateDebut,
+        statut: _statut,
+        dateCreation: widget.motoExistante?.dateCreation,
+        notes: _notesCtrl.text.trim().isEmpty ? null : _notesCtrl.text.trim(),
+      );
 
-    if (!_modeEdition) {
-      final id = await _db.insererMoto(moto);
-      final motoAvecId = moto.copyWith(id: id);
-      final echeances = ScheduleService.genererEcheances(motoAvecId);
-      await _db.insererVersements(echeances);
-      await _planifierNotifications(motoAvecId);
-    } else {
-      final ancien = widget.motoExistante!;
-      final changementPlan = ancien.montantTotal != montantTotal ||
-          ancien.montantVersement != montantVersement ||
-          ancien.frequenceType != _frequenceType ||
-          ancien.frequenceValeur != _frequenceValeur ||
-          ancien.dateDebut != _dateDebut;
+      if (!_modeEdition) {
+        final id = await _db.insererMoto(moto);
+        final motoAvecId = moto.copyWith(id: id);
+        await _db.assurerEcheances(motoAvecId);
+        await _planifierNotifications(motoAvecId);
+      } else {
+        final ancien = widget.motoExistante!;
+        final changementPlan = ancien.montantVersement != montantVersement ||
+            ancien.frequenceType != _frequenceType ||
+            ancien.frequenceValeur != _frequenceValeur ||
+            ancien.dateDebut != _dateDebut;
 
-      await _db.modifierMoto(moto);
+        await _db.modifierMoto(moto);
 
-      if (changementPlan && mounted) {
-        final confirme = await _confirmerRegeneration();
-        if (confirme == true) {
-          await _regenererEcheancesNonPayees(moto);
+        if (changementPlan && mounted) {
+          final confirme = await _confirmerRegeneration();
+          if (confirme == true) {
+            await _regenererEcheancesNonPayees(moto);
+          }
         }
+        await _planifierNotifications(moto);
       }
-      await _planifierNotifications(moto);
-    }
 
-    if (!mounted) return;
-    Navigator.pop(context);
+      if (!mounted) return;
+      Navigator.pop(context);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _enregistrement = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Erreur lors de l\'enregistrement : $e')),
+      );
+    }
   }
 
   Future<bool?> _confirmerRegeneration() {
@@ -150,14 +152,8 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
   Future<void> _regenererEcheancesNonPayees(Moto moto) async {
     if (moto.id == null) return;
     final tousLesVersements = await _db.listerVersementsParMoto(moto.id!);
-    final payes = tousLesVersements.where((v) => v.statut == AppConstants.versementPaye).toList();
     final nonPayes = tousLesVersements.where((v) => v.statut != AppConstants.versementPaye).toList();
 
-    final totalPaye = payes.fold<double>(0, (s, v) => s + (v.montantPaye ?? v.montantPrevu));
-    final montantRestant = moto.montantTotal - totalPaye;
-    if (montantRestant <= 0) return;
-
-    // Supprime les echeances non payees existantes
     for (final v in nonPayes) {
       if (v.id != null) {
         await NotificationService.annulerRappel(v.id!);
@@ -167,21 +163,7 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
     await db.delete('versements',
         where: 'moto_id = ? AND statut != ?', whereArgs: [moto.id, AppConstants.versementPaye]);
 
-    // Regenere a partir d'aujourd'hui (ou de la date de debut si future)
-    final dateDepart = _dateDebut.isAfter(DateTime.now()) ? _dateDebut : DateTime.now();
-    final motoTemporaire = moto.copyWith(
-      montantTotal: montantRestant,
-      dateDebut: dateDepart,
-    );
-    final nouvellesEcheances = ScheduleService.genererEcheances(motoTemporaire);
-    await _db.insererVersements(
-      nouvellesEcheances.map((v) => Versement(
-            motoId: moto.id!,
-            dateEcheance: v.dateEcheance,
-            montantPrevu: v.montantPrevu,
-            statut: AppConstants.versementEnAttente,
-          )).toList(),
-    );
+    await _db.assurerEcheances(moto);
   }
 
   Future<void> _planifierNotifications(Moto moto) async {
@@ -201,86 +183,80 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: Text(_modeEdition ? 'Modifier la moto' : 'Nouvelle moto')),
-      body: Form(
-        key: _formKey,
-        child: ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            TextFormField(
-              controller: _nomCtrl,
-              decoration: const InputDecoration(labelText: 'Nom de la moto'),
-              validator: (v) => (v == null || v.trim().isEmpty) ? 'Champ requis' : null,
-            ),
-            const SizedBox(height: 12),
-            TextFormField(
-              controller: _chauffeurCtrl,
-              decoration: const InputDecoration(labelText: 'Chauffeur'),
-              validator: (v) => (v == null || v.trim().isEmpty) ? 'Champ requis' : null,
-            ),
-            const SizedBox(height: 12),
-            TextFormField(
-              controller: _montantTotalCtrl,
-              decoration: const InputDecoration(labelText: 'Montant total a rembourser'),
-              keyboardType: TextInputType.number,
-              validator: (v) => (double.tryParse(v ?? '') == null) ? 'Montant invalide' : null,
-            ),
-            const SizedBox(height: 12),
-            TextFormField(
-              controller: _montantVersementCtrl,
-              decoration: const InputDecoration(labelText: 'Montant par versement'),
-              keyboardType: TextInputType.number,
-              validator: (v) => (double.tryParse(v ?? '') == null) ? 'Montant invalide' : null,
-            ),
-            const SizedBox(height: 20),
-            const Text('Frequence de versement', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
-            const SizedBox(height: 8),
-            _selecteurFrequenceType(),
-            const SizedBox(height: 12),
-            _parametreFrequence(),
-            const SizedBox(height: 20),
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Date de debut', style: TextStyle(fontSize: 13)),
-              subtitle: Text('${_dateDebut.day}/${_dateDebut.month}/${_dateDebut.year}'),
-              trailing: const Icon(Icons.calendar_today_outlined, size: 18),
-              onTap: () async {
-                final choisie = await showDatePicker(
-                  context: context,
-                  initialDate: _dateDebut,
-                  firstDate: DateTime(2020),
-                  lastDate: DateTime(2100),
-                );
-                if (choisie != null) setState(() => _dateDebut = choisie);
-              },
-            ),
-            const Divider(),
-            const SizedBox(height: 8),
-            TextFormField(
-              controller: _notesCtrl,
-              decoration: const InputDecoration(labelText: 'Notes (optionnel)'),
-              maxLines: 2,
-            ),
-            if (_modeEdition) ...[
-              const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                initialValue: _statut,
-                decoration: const InputDecoration(labelText: 'Statut'),
-                items: const [
-                  DropdownMenuItem(value: AppConstants.motoActive, child: Text('Actif')),
-                  DropdownMenuItem(value: AppConstants.motoSuspendue, child: Text('Suspendu')),
-                  DropdownMenuItem(value: AppConstants.motoSoldee, child: Text('Solde')),
-                  DropdownMenuItem(value: AppConstants.motoArchivee, child: Text('Archive')),
-                ],
-                onChanged: (v) => setState(() => _statut = v!),
+      body: SafeArea(
+        child: Form(
+          key: _formKey,
+          child: ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              TextFormField(
+                controller: _nomCtrl,
+                decoration: const InputDecoration(labelText: 'Nom de la moto'),
+                validator: (v) => (v == null || v.trim().isEmpty) ? 'Champ requis' : null,
               ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _chauffeurCtrl,
+                decoration: const InputDecoration(labelText: 'Chauffeur'),
+                validator: (v) => (v == null || v.trim().isEmpty) ? 'Champ requis' : null,
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _montantVersementCtrl,
+                decoration: const InputDecoration(labelText: 'Montant par versement'),
+                keyboardType: TextInputType.number,
+                validator: (v) => (double.tryParse(v ?? '') == null) ? 'Montant invalide' : null,
+              ),
+              const SizedBox(height: 20),
+              const Text('Frequence de versement', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+              const SizedBox(height: 8),
+              _selecteurFrequenceType(),
+              const SizedBox(height: 12),
+              _parametreFrequence(),
+              const SizedBox(height: 20),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Date de debut', style: TextStyle(fontSize: 13)),
+                subtitle: Text('${_dateDebut.day}/${_dateDebut.month}/${_dateDebut.year}'),
+                trailing: const Icon(Icons.calendar_today_outlined, size: 18),
+                onTap: () async {
+                  final choisie = await showDatePicker(
+                    context: context,
+                    initialDate: _dateDebut,
+                    firstDate: DateTime(2020),
+                    lastDate: DateTime(2100),
+                  );
+                  if (choisie != null) setState(() => _dateDebut = choisie);
+                },
+              ),
+              const Divider(),
+              const SizedBox(height: 8),
+              TextFormField(
+                controller: _notesCtrl,
+                decoration: const InputDecoration(labelText: 'Notes (optionnel)'),
+                maxLines: 2,
+              ),
+              if (_modeEdition) ...[
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  initialValue: _statut,
+                  decoration: const InputDecoration(labelText: 'Statut'),
+                  items: const [
+                    DropdownMenuItem(value: AppConstants.motoActive, child: Text('Actif')),
+                    DropdownMenuItem(value: AppConstants.motoSuspendue, child: Text('Suspendu')),
+                    DropdownMenuItem(value: AppConstants.motoArchivee, child: Text('Archive')),
+                  ],
+                  onChanged: (v) => setState(() => _statut = v!),
+                ),
+              ],
+              const SizedBox(height: 28),
+              ElevatedButton(
+                onPressed: _enregistrement ? null : _enregistrer,
+                child: Text(_enregistrement ? 'Enregistrement...' : 'Enregistrer'),
+              ),
+              const SizedBox(height: 20),
             ],
-            const SizedBox(height: 28),
-            ElevatedButton(
-              onPressed: _enregistrement ? null : _enregistrer,
-              child: Text(_enregistrement ? 'Enregistrement...' : 'Enregistrer'),
-            ),
-            const SizedBox(height: 20),
-          ],
+          ),
         ),
       ),
     );

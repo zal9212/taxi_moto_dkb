@@ -1,10 +1,14 @@
 import 'package:flutter/material.dart';
 
 import '../core/theme.dart';
+import '../models/depense.dart';
 import '../models/parametre.dart';
+import '../models/versement.dart';
 import '../services/database_service.dart';
 import '../services/auth_service.dart';
 import '../services/notification_service.dart';
+import '../services/pdf_service.dart';
+import 'stats_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -17,6 +21,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _db = DatabaseService.instance;
   Parametre? _parametres;
   bool _biometrieDisponible = false;
+  bool _generationRapportEnCours = false;
 
   @override
   void initState() {
@@ -120,6 +125,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  Future<void> _genererRapportGeneral() async {
+    setState(() => _generationRapportEnCours = true);
+    try {
+      final motos = await _db.listerMotos();
+      final versementsParMoto = <int, List<Versement>>{};
+      final depensesParMoto = <int, List<Depense>>{};
+      for (final m in motos) {
+        if (m.id == null) continue;
+        versementsParMoto[m.id!] = await _db.listerVersementsParMoto(m.id!);
+        depensesParMoto[m.id!] = await _db.listerDepensesParMoto(m.id!);
+      }
+      await PdfService.genererEtPartagerRapportGlobal(
+        motos: motos,
+        versementsParMoto: versementsParMoto,
+        depensesParMoto: depensesParMoto,
+        deviseSymbole: _parametres?.deviseSymbole ?? 'FG',
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Erreur lors de la generation du rapport : $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _generationRapportEnCours = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_parametres == null) {
@@ -138,6 +170,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
             valeur: p.deviseSymbole,
             icone: Icons.attach_money,
             onTap: _majDevise,
+          ),
+          const SizedBox(height: 20),
+          _sectionTitre('Rapports et statistiques'),
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppColors.bordure, width: 0.6),
+            ),
+            child: Column(
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.bar_chart_outlined, size: 20),
+                  title: const Text('Statistiques des versements', style: TextStyle(fontSize: 13)),
+                  subtitle: const Text('Par semaine, mois ou annee', style: TextStyle(fontSize: 10)),
+                  trailing: const Icon(Icons.chevron_right, size: 18),
+                  onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const StatsScreen())),
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.picture_as_pdf_outlined, size: 20),
+                  title: const Text('Rapport general (PDF)', style: TextStyle(fontSize: 13)),
+                  subtitle: const Text('Toutes les motos - versements et depenses', style: TextStyle(fontSize: 10)),
+                  trailing: _generationRapportEnCours
+                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.chevron_right, size: 18),
+                  onTap: _generationRapportEnCours ? null : _genererRapportGeneral,
+                ),
+              ],
+            ),
           ),
           const SizedBox(height: 20),
           _sectionTitre('Notifications'),

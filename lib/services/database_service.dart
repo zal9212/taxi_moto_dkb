@@ -6,12 +6,19 @@ import '../models/moto.dart';
 import '../models/versement.dart';
 import '../models/depense.dart';
 import '../models/parametre.dart';
+import 'schedule_service.dart';
 
 /// Point d'accès unique à la base SQLite locale.
 /// Toute lecture/écriture de l'app passe par ce service (singleton).
 class DatabaseService {
   DatabaseService._internal();
   static final DatabaseService instance = DatabaseService._internal();
+
+  /// Nombre d'échéances à venir (non payées) maintenues en permanence pour
+  /// chaque moto active. Dès qu'une échéance est validée, une nouvelle est
+  /// générée pour garder cette fenêtre pleine — le versement est récurrent
+  /// et indéfini, il n'y a pas de montant total à atteindre.
+  static const int _tailleFenetreEcheances = 4;
 
   Database? _db;
 
@@ -28,6 +35,7 @@ class DatabaseService {
       path,
       version: AppConstants.dbVersion,
       onCreate: _onCreate,
+      onUpgrade: _onUpgrade,
     );
   }
 
@@ -37,7 +45,6 @@ class DatabaseService {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         nom TEXT NOT NULL,
         chauffeur TEXT NOT NULL,
-        montant_total REAL NOT NULL,
         montant_versement REAL NOT NULL,
         frequence_type TEXT NOT NULL,
         frequence_valeur INTEGER NOT NULL,
@@ -103,6 +110,39 @@ class DatabaseService {
 
     // Ligne unique de paramètres par défaut
     await db.insert('parametres', Parametre().toMap());
+  }
+
+  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      // v2 : suppression du "montant total a rembourser" - l'app ne gere
+      // plus une dette a solder mais des versements recurrents indefinis.
+      // L'ancien statut "solde" n'existe plus, on le ramene a "actif".
+      await db.execute('''
+        CREATE TABLE motos_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          nom TEXT NOT NULL,
+          chauffeur TEXT NOT NULL,
+          montant_versement REAL NOT NULL,
+          frequence_type TEXT NOT NULL,
+          frequence_valeur INTEGER NOT NULL,
+          date_debut TEXT NOT NULL,
+          statut TEXT NOT NULL,
+          date_creation TEXT NOT NULL,
+          notes TEXT
+        )
+      ''');
+      await db.execute('''
+        INSERT INTO motos_new (id, nom, chauffeur, montant_versement, frequence_type,
+                                frequence_valeur, date_debut, statut, date_creation, notes)
+        SELECT id, nom, chauffeur, montant_versement, frequence_type, frequence_valeur,
+               date_debut,
+               CASE WHEN statut = 'solde' THEN 'actif' ELSE statut END,
+               date_creation, notes
+        FROM motos
+      ''');
+      await db.execute('DROP TABLE motos');
+      await db.execute('ALTER TABLE motos_new RENAME TO motos');
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -293,11 +333,119 @@ class DatabaseService {
     return (result.first['total'] as num).toDouble();
   }
 
-  /// Solde restant dû pour une moto = montant total - somme des payés.
-  Future<double> soldeRestant(int motoId, double montantTotal) async {
-    final paye = await totalEncaisse(motoId: motoId);
-    final solde = montantTotal - paye;
-    return solde < 0 ? 0 : solde;
+  /// Total des versements reçus (payés), regroupé par période, pour les
+  /// statistiques. [periode] vaut 'semaine' | 'mois' | 'annee'. Retourne les
+  /// [nombrePeriodes] dernières périodes, clé = date de début de période,
+  /// triées du plus ancien au plus récent, avec 0 pour les périodes sans
+  /// versement (pour un graphique continu).
+  Future<List<MapEntry<DateTime, double>>> totalEncaisseParPeriode({
+    required String periode,
+    int? motoId,
+    int nombrePeriodes = 8,
+  }) async {
+    final maintenant = DateTime.now();
+    final aujourdHui = DateTime(maintenant.year, maintenant.month, maintenant.day);
+
+    DateTime cleDe(DateTime d) {
+      switch (periode) {
+        case 'semaine':
+          final lundi = d.subtract(Duration(days: d.weekday - 1));
+          return DateTime(lundi.year, lundi.month, lundi.day);
+        case 'annee':
+          return DateTime(d.year);
+        case 'mois':
+        default:
+          return DateTime(d.year, d.month);
+      }
+    }
+
+    DateTime periodePrecedente(DateTime cle) {
+      switch (periode) {
+        case 'semaine':
+          return cle.subtract(const Duration(days: 7));
+        case 'annee':
+          return DateTime(cle.year - 1);
+        case 'mois':
+        default:
+          return DateTime(cle.year, cle.month - 1);
+      }
+    }
+
+    final cleActuelle = cleDe(aujourdHui);
+    final cles = <DateTime>[cleActuelle];
+    for (var i = 1; i < nombrePeriodes; i++) {
+      cles.insert(0, periodePrecedente(cles.first));
+    }
+    final debut = cles.first;
+
+    final db = await database;
+    final conditions = <String>["statut = ?", "date_validation >= ?"];
+    final args = <dynamic>[AppConstants.versementPaye, debut.toIso8601String()];
+    if (motoId != null) {
+      conditions.add('moto_id = ?');
+      args.add(motoId);
+    }
+    final maps = await db.query(
+      'versements',
+      where: conditions.join(' AND '),
+      whereArgs: args,
+    );
+
+    final totauxParCle = {for (final c in cles) c: 0.0};
+    for (final m in maps) {
+      final v = Versement.fromMap(m);
+      if (v.dateValidation == null) continue;
+      final cle = cleDe(v.dateValidation!);
+      if (totauxParCle.containsKey(cle)) {
+        totauxParCle[cle] = totauxParCle[cle]! + (v.montantPaye ?? 0);
+      }
+    }
+
+    return cles.map((c) => MapEntry(c, totauxParCle[c] ?? 0.0)).toList();
+  }
+
+  /// Garantit qu'il existe toujours au moins [_tailleFenetreEcheances]
+  /// échéances non payées à venir pour cette moto : génère les suivantes
+  /// si besoin, en repartant de la dernière échéance connue (ou de la
+  /// date de début si c'est la toute première). Les versements étant
+  /// récurrents et indéfinis, cette fenêtre glissante remplace l'ancien
+  /// plan fini basé sur un montant total.
+  Future<void> assurerEcheances(Moto moto) async {
+    if (moto.id == null) return;
+    final existants = await listerVersementsParMoto(moto.id!); // tri date DESC
+    final enCours = existants.where((v) => v.statut != AppConstants.versementPaye).length;
+    if (enCours >= _tailleFenetreEcheances) return;
+
+    DateTime prochaine;
+    if (existants.isEmpty) {
+      prochaine = ScheduleService.premiereEcheance(
+        dateDebut: moto.dateDebut,
+        type: moto.frequenceType,
+        valeur: moto.frequenceValeur,
+      );
+    } else {
+      prochaine = ScheduleService.echeanceSuivante(
+        dateActuelle: existants.first.dateEcheance,
+        type: moto.frequenceType,
+        valeur: moto.frequenceValeur,
+      );
+    }
+
+    final nouvelles = <Versement>[];
+    for (var i = 0; i < _tailleFenetreEcheances - enCours; i++) {
+      nouvelles.add(Versement(
+        motoId: moto.id!,
+        dateEcheance: prochaine,
+        montantPrevu: moto.montantVersement,
+        statut: AppConstants.versementEnAttente,
+      ));
+      prochaine = ScheduleService.echeanceSuivante(
+        dateActuelle: prochaine,
+        type: moto.frequenceType,
+        valeur: moto.frequenceValeur,
+      );
+    }
+    await insererVersements(nouvelles);
   }
 
   // ---------------------------------------------------------------------

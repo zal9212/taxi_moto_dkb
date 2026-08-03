@@ -4,7 +4,6 @@ import '../core/constants.dart';
 import '../core/theme.dart';
 import '../models/moto.dart';
 import '../models/versement.dart';
-import '../models/depense.dart';
 import '../models/parametre.dart';
 import '../services/database_service.dart';
 import '../utils/formatters.dart';
@@ -64,6 +63,13 @@ class _HomeScreenState extends State<HomeScreen> {
     final bornes = _bornesPeriode;
     final params = await _db.obtenirParametres();
     final motos = await _db.listerMotos();
+
+    // Garde la fenetre d'echeances a venir pleine pour chaque moto active
+    // (versement recurrent et indefini) - toute modification (montant,
+    // frequence...) se repercute donc immediatement sur tout le reste.
+    for (final m in motos.where((m) => m.statut == AppConstants.motoActive)) {
+      await _db.assurerEcheances(m);
+    }
     final totalEncaisse = await _db.totalEncaisse(
       motoId: _motoFiltreId,
       debut: bornes.debut,
@@ -366,7 +372,7 @@ class _HomeScreenState extends State<HomeScreen> {
               final item = items[i];
               return MotoCard(
                 moto: item.moto,
-                soldeRestant: item.solde,
+                totalVerse: item.totalVerse,
                 prochainVersement: item.prochain,
                 devise: devise,
                 onTap: () async {
@@ -388,9 +394,9 @@ class _HomeScreenState extends State<HomeScreen> {
     final resultats = <_MotoAvecInfos>[];
     for (final moto in _motos) {
       if (moto.id == null) continue;
-      final solde = await _db.soldeRestant(moto.id!, moto.montantTotal);
+      final totalVerse = await _db.totalEncaisse(motoId: moto.id!);
       final prochain = await _db.prochainVersement(moto.id!);
-      resultats.add(_MotoAvecInfos(moto: moto, solde: solde, prochain: prochain));
+      resultats.add(_MotoAvecInfos(moto: moto, totalVerse: totalVerse, prochain: prochain));
     }
     return resultats;
   }
@@ -414,8 +420,8 @@ class _ActiviteRecente {
 
 class _MotoAvecInfos {
   final Moto moto;
-  final double solde;
+  final double totalVerse;
   final Versement? prochain;
 
-  _MotoAvecInfos({required this.moto, required this.solde, required this.prochain});
+  _MotoAvecInfos({required this.moto, required this.totalVerse, required this.prochain});
 }

@@ -23,7 +23,8 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
   final _db = DatabaseService.instance;
   Moto? _moto;
   List<Versement> _versements = [];
-  double _solde = 0;
+  double _totalVerse = 0;
+  double _totalEnRetard = 0;
   String _devise = AppConstants.devisePardDefaut;
   bool _chargement = true;
 
@@ -37,23 +38,27 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     setState(() => _chargement = true);
     final moto = await _db.obtenirMoto(widget.motoId);
     if (moto == null) return;
+
+    // Maintient la fenetre d'echeances a venir pleine (versement recurrent
+    // et indefini, pas de montant total a atteindre).
+    if (moto.statut == AppConstants.motoActive) {
+      await _db.assurerEcheances(moto);
+    }
+
     final versements = await _db.listerVersementsParMoto(widget.motoId);
-    final solde = await _db.soldeRestant(widget.motoId, moto.montantTotal);
+    final totalVerse = await _db.totalEncaisse(motoId: widget.motoId);
+    final totalEnRetard = await _db.totalEnRetard(motoId: widget.motoId);
     final params = await _db.obtenirParametres();
 
     if (!mounted) return;
     setState(() {
       _moto = moto;
       _versements = versements;
-      _solde = solde;
+      _totalVerse = totalVerse;
+      _totalEnRetard = totalEnRetard;
       _devise = params.deviseSymbole;
       _chargement = false;
     });
-
-    // Moto entierement remboursee -> statut "solde" automatique
-    if (solde <= 0 && moto.statut != AppConstants.motoSoldee) {
-      await _db.modifierMoto(moto.copyWith(statut: AppConstants.motoSoldee));
-    }
   }
 
   Versement? get _prochain {
@@ -98,6 +103,7 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     final montant = double.tryParse(controleur.text) ?? v.montantPrevu;
     await _db.validerVersement(v.id!, montantPaye: montant);
     if (v.id != null) await NotificationService.annulerRappel(v.id!);
+    if (_moto != null) await _db.assurerEcheances(_moto!);
     _charger();
   }
 
@@ -108,7 +114,6 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
       moto: _moto!,
       versements: _versements,
       depenses: depenses,
-      soldeRestant: _solde,
       deviseSymbole: _devise,
     );
   }
@@ -154,28 +159,37 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    'Solde restant sur ${formaterMontant(moto.montantTotal, _devise)}',
-                    style: TextStyle(color: AppColors.texteGris, fontSize: 10),
-                  ),
+                  Text('Total encaisse', style: TextStyle(color: AppColors.texteGris, fontSize: 10)),
                   const SizedBox(height: 4),
-                  Text(formaterMontant(_solde, _devise),
+                  Text(formaterMontant(_totalVerse, _devise),
                       style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w600)),
                   const SizedBox(height: 4),
                   Text(
                     ScheduleService.libelleFrequence(moto.frequenceType, moto.frequenceValeur),
                     style: TextStyle(color: AppColors.texteGris, fontSize: 11),
                   ),
+                  if (_totalEnRetard > 0) ...[
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        const Icon(Icons.error_outline, color: Color(0xFFE2554A), size: 14),
+                        const SizedBox(width: 6),
+                        Text('En retard : ${formaterMontant(_totalEnRetard, _devise)}',
+                            style: const TextStyle(color: Color(0xFFE2554A), fontSize: 11, fontWeight: FontWeight.w600)),
+                      ],
+                    ),
+                  ],
                   const SizedBox(height: 14),
-                  if (moto.statut == AppConstants.motoSoldee)
+                  if (moto.statut != AppConstants.motoActive)
                     Container(
                       padding: const EdgeInsets.symmetric(vertical: 10),
                       decoration: BoxDecoration(
-                          color: AppColors.accentLime.withOpacity(0.15),
-                          borderRadius: BorderRadius.circular(10)),
-                      child: const Center(
-                        child: Text('Moto entierement remboursee',
-                            style: TextStyle(color: AppColors.accentLime, fontWeight: FontWeight.w600, fontSize: 12)),
+                          color: Colors.white.withOpacity(0.08), borderRadius: BorderRadius.circular(10)),
+                      child: Center(
+                        child: Text(
+                          moto.statut == AppConstants.motoSuspendue ? 'Moto suspendue' : 'Moto archivee',
+                          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 12),
+                        ),
                       ),
                     )
                   else if (prochain != null)

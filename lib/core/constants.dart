@@ -7,7 +7,7 @@ class AppConstants {
   AppConstants._();
 
   static const String dbName = 'moto_taxi_douka.db';
-  static const int dbVersion = 1;
+  static const int dbVersion = 2;
 
   // Valeurs par défaut au premier lancement (modifiables ensuite)
   static const String devisePardDefaut = 'FG';
@@ -19,9 +19,8 @@ class AppConstants {
   static const String freqMensuelle = 'mensuelle';
   static const String freqPersonnalisee = 'personnalisee'; // intervalle en jours
 
-  // Statuts moto
+  // Statuts moto (pas de notion de dette/solde : uniquement le cycle de vie)
   static const String motoActive = 'actif';
-  static const String motoSoldee = 'solde';
   static const String motoSuspendue = 'suspendu';
   static const String motoArchivee = 'archive';
 

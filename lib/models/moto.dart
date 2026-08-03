@@ -1,13 +1,14 @@
 import '../core/constants.dart';
 
-/// Représente une moto-taxi et son plan de remboursement.
-/// Tous les paramètres (montants, fréquence, jour de référence) sont
-/// configurables librement à la création et modifiables ensuite.
+/// Représente une moto-taxi et son plan de versements récurrents.
+/// Il n'y a pas de "montant total à rembourser" : le gérant collecte un
+/// versement fixe à chaque échéance, indéfiniment, tant que la moto est
+/// active. Tous les paramètres (montant, fréquence, jour de référence)
+/// sont configurables librement à la création et modifiables ensuite.
 class Moto {
   final int? id;
   final String nom;
   final String chauffeur;
-  final double montantTotal;
   final double montantVersement;
 
   /// AppConstants.freqHebdomadaire | freqMensuelle | freqPersonnalisee
@@ -20,7 +21,7 @@ class Moto {
   final int frequenceValeur;
 
   final DateTime dateDebut;
-  final String statut; // actif | solde | suspendu | archive
+  final String statut; // actif | suspendu | archive
   final DateTime dateCreation;
   final String? notes;
 
@@ -28,7 +29,6 @@ class Moto {
     this.id,
     required this.nom,
     required this.chauffeur,
-    required this.montantTotal,
     required this.montantVersement,
     required this.frequenceType,
     required this.frequenceValeur,
@@ -38,14 +38,10 @@ class Moto {
     this.notes,
   }) : dateCreation = dateCreation ?? DateTime.now();
 
-  /// Nombre total de versements nécessaires pour solder la moto.
-  int get nombreVersements => (montantTotal / montantVersement).ceil();
-
   Moto copyWith({
     int? id,
     String? nom,
     String? chauffeur,
-    double? montantTotal,
     double? montantVersement,
     String? frequenceType,
     int? frequenceValeur,
@@ -57,7 +53,6 @@ class Moto {
       id: id ?? this.id,
       nom: nom ?? this.nom,
       chauffeur: chauffeur ?? this.chauffeur,
-      montantTotal: montantTotal ?? this.montantTotal,
       montantVersement: montantVersement ?? this.montantVersement,
       frequenceType: frequenceType ?? this.frequenceType,
       frequenceValeur: frequenceValeur ?? this.frequenceValeur,
@@ -73,7 +68,6 @@ class Moto {
       'id': id,
       'nom': nom,
       'chauffeur': chauffeur,
-      'montant_total': montantTotal,
       'montant_versement': montantVersement,
       'frequence_type': frequenceType,
       'frequence_valeur': frequenceValeur,
@@ -89,7 +83,6 @@ class Moto {
       id: map['id'] as int?,
       nom: map['nom'] as String,
       chauffeur: map['chauffeur'] as String,
-      montantTotal: (map['montant_total'] as num).toDouble(),
       montantVersement: (map['montant_versement'] as num).toDouble(),
       frequenceType: map['frequence_type'] as String,
       frequenceValeur: map['frequence_valeur'] as int,

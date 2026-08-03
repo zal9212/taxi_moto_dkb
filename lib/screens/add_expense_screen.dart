@@ -46,16 +46,24 @@ class _AddExpenseScreenState extends State<AddExpenseScreen> {
     if (!_formKey.currentState!.validate() || _motoId == null || _categorieId == null) return;
     setState(() => _enregistrement = true);
 
-    await _db.insererDepense(Depense(
-      motoId: _motoId!,
-      categorieId: _categorieId!,
-      montant: double.parse(_montantCtrl.text.replaceAll(' ', '')),
-      date: _date,
-      description: _descriptionCtrl.text.trim().isEmpty ? null : _descriptionCtrl.text.trim(),
-    ));
+    try {
+      await _db.insererDepense(Depense(
+        motoId: _motoId!,
+        categorieId: _categorieId!,
+        montant: double.parse(_montantCtrl.text.replaceAll(' ', '')),
+        date: _date,
+        description: _descriptionCtrl.text.trim().isEmpty ? null : _descriptionCtrl.text.trim(),
+      ));
 
-    if (!mounted) return;
-    Navigator.pop(context);
+      if (!mounted) return;
+      Navigator.pop(context);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _enregistrement = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Erreur lors de l\'enregistrement : $e')),
+      );
+    }
   }
 
   @override

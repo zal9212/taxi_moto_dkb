@@ -92,44 +92,53 @@ class _SetupPinScreenState extends State<SetupPinScreen> {
     return Scaffold(
       backgroundColor: AppColors.carteNoire,
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            children: [
-              const Spacer(),
-              const Icon(Icons.lock_outline, color: AppColors.accentLime, size: 40),
-              const SizedBox(height: 16),
-              Text(
-                _etapeConfirmation ? 'Confirmez votre code' : 'Creez un code PIN',
-                style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            return SingleChildScrollView(
+              padding: const EdgeInsets.all(24),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minHeight: constraints.maxHeight - 48),
+                child: IntrinsicHeight(
+                  child: Column(
+                    children: [
+                      const Spacer(),
+                      const Icon(Icons.lock_outline, color: AppColors.accentLime, size: 40),
+                      const SizedBox(height: 16),
+                      Text(
+                        _etapeConfirmation ? 'Confirmez votre code' : 'Creez un code PIN',
+                        style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        _erreur ? 'Les codes ne correspondent pas' : 'Pour proteger l\'acces a l\'application',
+                        style: TextStyle(color: _erreur ? AppColors.danger : AppColors.texteGris, fontSize: 13),
+                      ),
+                      const SizedBox(height: 24),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: List.generate(4, (i) {
+                          final rempli = i < saisie.length;
+                          return Container(
+                            margin: const EdgeInsets.symmetric(horizontal: 8),
+                            width: 14,
+                            height: 14,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: rempli ? AppColors.accentLime : Colors.transparent,
+                              border: Border.all(color: AppColors.accentLime, width: 1.4),
+                            ),
+                          );
+                        }),
+                      ),
+                      const Spacer(),
+                      _clavierNumerique(),
+                      const SizedBox(height: 12),
+                    ],
+                  ),
+                ),
               ),
-              const SizedBox(height: 4),
-              Text(
-                _erreur ? 'Les codes ne correspondent pas' : 'Pour proteger l\'acces a l\'application',
-                style: TextStyle(color: _erreur ? AppColors.danger : AppColors.texteGris, fontSize: 13),
-              ),
-              const SizedBox(height: 24),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: List.generate(4, (i) {
-                  final rempli = i < saisie.length;
-                  return Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 8),
-                    width: 14,
-                    height: 14,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: rempli ? AppColors.accentLime : Colors.transparent,
-                      border: Border.all(color: AppColors.accentLime, width: 1.4),
-                    ),
-                  );
-                }),
-              ),
-              const Spacer(),
-              _clavierNumerique(),
-              const SizedBox(height: 12),
-            ],
-          ),
+            );
+          },
         ),
       ),
     );
