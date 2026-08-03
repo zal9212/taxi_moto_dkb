@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../core/theme.dart';
@@ -24,10 +26,19 @@ class _LockScreenState extends State<LockScreen> {
   bool _pinExiste = false;
   bool _biometrieActive = false;
 
+  int _secondesVerrou = 0;
+  Timer? _minuteur;
+
   @override
   void initState() {
     super.initState();
     _initialiser();
+  }
+
+  @override
+  void dispose() {
+    _minuteur?.cancel();
+    super.dispose();
   }
 
   Future<void> _initialiser() async {
@@ -39,18 +50,34 @@ class _LockScreenState extends State<LockScreen> {
       return;
     }
 
+    final secondesVerrou = await AuthService.secondesAvantDeblocage();
+
     setState(() {
       _pinExiste = true;
       _biometrieActive = params.biometrieActive;
       _verificationEnCours = false;
+      _secondesVerrou = secondesVerrou;
     });
 
-    if (_biometrieActive) {
+    if (secondesVerrou > 0) {
+      _demarrerCompteARebours();
+    } else if (_biometrieActive) {
       _tenterBiometrie();
     }
   }
 
+  void _demarrerCompteARebours() {
+    _minuteur?.cancel();
+    _minuteur = Timer.periodic(const Duration(seconds: 1), (timer) async {
+      final restant = await AuthService.secondesAvantDeblocage();
+      if (!mounted) return;
+      setState(() => _secondesVerrou = restant);
+      if (restant <= 0) timer.cancel();
+    });
+  }
+
   Future<void> _tenterBiometrie() async {
+    if (_secondesVerrou > 0) return;
     final disponible = await AuthService.biometrieDisponible();
     if (!disponible) return;
     final succes = await AuthService.authentifierParBiometrie();
@@ -65,7 +92,7 @@ class _LockScreenState extends State<LockScreen> {
   }
 
   Future<void> _ajouterChiffre(String chiffre) async {
-    if (_saisie.length >= 4) return;
+    if (_secondesVerrou > 0 || _saisie.length >= 4) return;
     setState(() {
       _saisie.add(chiffre);
       _erreur = false;
@@ -74,17 +101,35 @@ class _LockScreenState extends State<LockScreen> {
       final ok = await AuthService.verifierPin(_saisie.join());
       if (ok) {
         _allerVersAccueil();
-      } else {
-        setState(() => _erreur = true);
-        await Future.delayed(const Duration(milliseconds: 400));
-        setState(() => _saisie.clear());
+        return;
       }
+
+      final secondesVerrou = await AuthService.secondesAvantDeblocage();
+      if (!mounted) return;
+      setState(() {
+        _erreur = true;
+        _secondesVerrou = secondesVerrou;
+      });
+      if (secondesVerrou > 0) _demarrerCompteARebours();
+      await Future.delayed(const Duration(milliseconds: 400));
+      if (!mounted) return;
+      setState(() => _saisie.clear());
     }
   }
 
   void _effacer() {
-    if (_saisie.isEmpty) return;
+    if (_secondesVerrou > 0 || _saisie.isEmpty) return;
     setState(() => _saisie.removeLast());
+  }
+
+  String _libelleMessage() {
+    if (_secondesVerrou > 0) {
+      final minutes = _secondesVerrou ~/ 60;
+      final secondes = _secondesVerrou % 60;
+      final duree = minutes > 0 ? '${minutes}min ${secondes}s' : '${secondes}s';
+      return 'Trop de tentatives. Reessayez dans $duree';
+    }
+    return _erreur ? 'Code incorrect, reessayez' : 'Entrez votre code';
   }
 
   @override
@@ -97,6 +142,8 @@ class _LockScreenState extends State<LockScreen> {
       // Sécurité non configurée : proposer la configuration au premier lancement
       return SetupPinScreen(onTermine: _allerVersAccueil);
     }
+
+    final verrouille = _secondesVerrou > 0;
 
     return Scaffold(
       backgroundColor: AppColors.carteNoire,
@@ -111,16 +158,24 @@ class _LockScreenState extends State<LockScreen> {
                   child: Column(
                     children: [
                       const Spacer(),
-                      const Icon(Icons.motorcycle, color: AppColors.accentLime, size: 48),
+                      Icon(
+                        verrouille ? Icons.lock_clock_outlined : Icons.motorcycle,
+                        color: AppColors.accentLime,
+                        size: 48,
+                      ),
                       const SizedBox(height: 16),
                       const Text('Moto Taxi Douka',
                           style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600)),
                       const SizedBox(height: 4),
-                      Text(
-                        _erreur ? 'Code incorrect, reessayez' : 'Entrez votre code',
-                        style: TextStyle(
-                          color: _erreur ? AppColors.danger : AppColors.texteGris,
-                          fontSize: 13,
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child: Text(
+                          _libelleMessage(),
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: (_erreur || verrouille) ? AppColors.danger : AppColors.texteGris,
+                            fontSize: 13,
+                          ),
                         ),
                       ),
                       const SizedBox(height: 24),
@@ -141,7 +196,7 @@ class _LockScreenState extends State<LockScreen> {
                         }),
                       ),
                       const Spacer(),
-                      if (_biometrieActive)
+                      if (_biometrieActive && !verrouille)
                         TextButton.icon(
                           onPressed: _tenterBiometrie,
                           icon: const Icon(Icons.fingerprint, color: AppColors.accentLime),
@@ -149,7 +204,10 @@ class _LockScreenState extends State<LockScreen> {
                               style: TextStyle(color: AppColors.accentLime)),
                         ),
                       const SizedBox(height: 12),
-                      _clavierNumerique(),
+                      Opacity(
+                        opacity: verrouille ? 0.3 : 1,
+                        child: IgnorePointer(ignoring: verrouille, child: _clavierNumerique()),
+                      ),
                       const SizedBox(height: 12),
                     ],
                   ),
