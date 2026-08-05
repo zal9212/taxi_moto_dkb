@@ -159,11 +159,18 @@ class PdfService {
 
     await Printing.sharePdf(
       bytes: await doc.save(),
-      filename: 'rapport_general_${_formaterDate(DateTime.now())}.pdf',
+      filename: 'rapport_general_${_formaterDateFichier(DateTime.now())}.pdf',
     );
   }
 
   static String _formaterDate(DateTime d) {
     return '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}/${d.year}';
+  }
+
+  /// Comme [_formaterDate] mais sans '/' : utilisable dans un nom de fichier
+  /// (le '/' y serait interprete comme un separateur de dossier et ferait
+  /// echouer l'ecriture du PDF).
+  static String _formaterDateFichier(DateTime d) {
+    return '${d.day.toString().padLeft(2, '0')}-${d.month.toString().padLeft(2, '0')}-${d.year}';
   }
 }
