@@ -49,6 +49,13 @@ class MotoCard extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
+                if (moto.id != null) ...[
+                  Text(
+                    'N°${moto.id}',
+                    style: TextStyle(color: AppColors.texteGris, fontSize: 10),
+                  ),
+                  const SizedBox(width: 8),
+                ],
                 _badgeStatut(estInactive, estEnRetard),
               ],
             ),

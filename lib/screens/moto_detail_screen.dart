@@ -129,7 +129,18 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text('${moto.nom} - ${moto.chauffeur}'),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('${moto.nom} - ${moto.chauffeur}'),
+            if (moto.id != null)
+              Text(
+                'N°${moto.id}',
+                style: const TextStyle(fontSize: 11, fontWeight: FontWeight.normal),
+              ),
+          ],
+        ),
         actions: [
           IconButton(
             icon: const Icon(Icons.picture_as_pdf_outlined),

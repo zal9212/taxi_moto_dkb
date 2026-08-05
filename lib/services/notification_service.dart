@@ -73,7 +73,10 @@ class NotificationService {
           '${_formaterDate(versement.dateEcheance)}',
       tz.TZDateTime.from(dateRappel, tz.local),
       details,
-      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+      // Mode inexact : ne necessite pas la permission "alarmes exactes"
+      // (refusee par defaut sur Android 12+). Un rappel peut arriver avec
+      // quelques minutes de decalage, ce qui est sans consequence ici.
+      androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
       uiLocalNotificationDateInterpretation:
           UILocalNotificationDateInterpretation.absoluteTime,
     );
