@@ -9,6 +9,8 @@ import '../utils/formatters.dart';
 class MotoCard extends StatelessWidget {
   final Moto moto;
   final double totalVerse;
+  /// Solde net : negatif = retard (dette), positif = avance (credit).
+  final double solde;
   final Versement? prochainVersement;
   final String devise;
   final VoidCallback onTap;
@@ -17,6 +19,7 @@ class MotoCard extends StatelessWidget {
     super.key,
     required this.moto,
     required this.totalVerse,
+    required this.solde,
     required this.prochainVersement,
     required this.devise,
     required this.onTap,
@@ -24,7 +27,8 @@ class MotoCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final estEnRetard = prochainVersement?.statut == AppConstants.versementEnRetard;
+    final estEnRetard = solde < 0;
+    final estEnAvance = solde > 0;
     final estInactive = moto.statut != AppConstants.motoActive;
 
     return InkWell(
@@ -66,6 +70,19 @@ class MotoCard extends StatelessWidget {
               formaterMontant(totalVerse, devise),
               style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
             ),
+            if (!estInactive && (estEnRetard || estEnAvance)) ...[
+              const SizedBox(height: 4),
+              Text(
+                estEnRetard
+                    ? 'En retard de ${formaterMontant(-solde, devise)}'
+                    : 'En avance de ${formaterMontant(solde, devise)}',
+                style: TextStyle(
+                  color: estEnRetard ? AppColors.danger : AppColors.succes,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
             const SizedBox(height: 8),
             if (prochainVersement != null && !estInactive)
               Row(

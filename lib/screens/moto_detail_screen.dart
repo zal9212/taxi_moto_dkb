@@ -24,7 +24,8 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
   Moto? _moto;
   List<Versement> _versements = [];
   double _totalVerse = 0;
-  double _totalEnRetard = 0;
+  /// Solde net : negatif = retard (dette), positif = avance (credit).
+  double _solde = 0;
   String _devise = AppConstants.devisePardDefaut;
   bool _chargement = true;
 
@@ -47,7 +48,7 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
 
     final versements = await _db.listerVersementsParMoto(widget.motoId);
     final totalVerse = await _db.totalEncaisse(motoId: widget.motoId);
-    final totalEnRetard = await _db.totalEnRetard(motoId: widget.motoId);
+    final solde = await _db.soldeNet(motoId: widget.motoId);
     final params = await _db.obtenirParametres();
 
     if (!mounted) return;
@@ -55,7 +56,7 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
       _moto = moto;
       _versements = versements;
       _totalVerse = totalVerse;
-      _totalEnRetard = totalEnRetard;
+      _solde = solde;
       _devise = params.deviseSymbole;
       _chargement = false;
     });
@@ -118,6 +119,103 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     );
   }
 
+  Future<void> _supprimerMoto() async {
+    if (_moto?.id == null) return;
+    final confirme = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Supprimer cette moto ?'),
+        content: Text(
+          '"${_moto!.nom}" et tout son historique (versements, depenses) '
+          'seront definitivement supprimes. Cette action est irreversible.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Annuler')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: TextButton.styleFrom(foregroundColor: AppColors.danger),
+            child: const Text('Supprimer'),
+          ),
+        ],
+      ),
+    );
+    if (confirme != true || _moto?.id == null) return;
+
+    for (final v in _versements) {
+      if (v.id != null) await NotificationService.annulerRappel(v.id!);
+    }
+    await _db.supprimerMoto(_moto!.id!);
+    if (!mounted) return;
+    Navigator.pop(context);
+  }
+
+  /// Corrige le montant d'un versement deja valide, ou annule sa
+  /// validation (redevient en attente / en retard) en cas d'erreur de
+  /// saisie du gerant.
+  Future<void> _modifierVersementPaye(Versement v) async {
+    if (v.id == null) return;
+    final controleur = TextEditingController(
+      text: (v.montantPaye ?? v.montantPrevu).toStringAsFixed(0),
+    );
+    final action = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Modifier ce versement'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Echeance du ${formaterDate(v.dateEcheance)}',
+                style: TextStyle(color: AppColors.texteGris, fontSize: 12)),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controleur,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: 'Montant verse'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'annuler_validation'),
+            style: TextButton.styleFrom(foregroundColor: AppColors.danger),
+            child: const Text('Annuler la validation'),
+          ),
+          TextButton(onPressed: () => Navigator.pop(context, null), child: const Text('Fermer')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, 'enregistrer'),
+            child: const Text('Enregistrer'),
+          ),
+        ],
+      ),
+    );
+
+    if (action == 'enregistrer') {
+      final montant = double.tryParse(controleur.text);
+      if (montant == null) return;
+      await _db.modifierMontantPaye(v.id!, montant);
+      _charger();
+    } else if (action == 'annuler_validation') {
+      if (!mounted) return;
+      final confirme = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Annuler la validation ?'),
+          content: const Text(
+              'Ce versement redeviendra en attente (ou en retard si l\'echeance est deja passee).'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Non')),
+            ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('Oui, annuler')),
+          ],
+        ),
+      );
+      if (confirme == true) {
+        await _db.annulerValidationVersement(v.id!);
+        _charger();
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_chargement || _moto == null) {
@@ -157,6 +255,17 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
               _charger();
             },
           ),
+          PopupMenuButton<String>(
+            onSelected: (v) {
+              if (v == 'supprimer') _supprimerMoto();
+            },
+            itemBuilder: (context) => [
+              PopupMenuItem(
+                value: 'supprimer',
+                child: Text('Supprimer la moto', style: TextStyle(color: AppColors.danger)),
+              ),
+            ],
+          ),
         ],
       ),
       body: RefreshIndicator(
@@ -179,14 +288,26 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
                     ScheduleService.libelleFrequence(moto.frequenceType, moto.frequenceValeur),
                     style: TextStyle(color: AppColors.texteGris, fontSize: 11),
                   ),
-                  if (_totalEnRetard > 0) ...[
+                  if (_solde != 0) ...[
                     const SizedBox(height: 10),
                     Row(
                       children: [
-                        const Icon(Icons.error_outline, color: Color(0xFFE2554A), size: 14),
+                        Icon(
+                          _solde < 0 ? Icons.error_outline : Icons.trending_up,
+                          color: _solde < 0 ? const Color(0xFFE2554A) : AppColors.accentLime,
+                          size: 14,
+                        ),
                         const SizedBox(width: 6),
-                        Text('En retard : ${formaterMontant(_totalEnRetard, _devise)}',
-                            style: const TextStyle(color: Color(0xFFE2554A), fontSize: 11, fontWeight: FontWeight.w600)),
+                        Text(
+                          _solde < 0
+                              ? 'En retard de : ${formaterMontant(-_solde, _devise)}'
+                              : 'En avance de : ${formaterMontant(_solde, _devise)}',
+                          style: TextStyle(
+                            color: _solde < 0 ? const Color(0xFFE2554A) : AppColors.accentLime,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
                       ],
                     ),
                   ],
@@ -243,42 +364,51 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
         libelle = 'A venir';
     }
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: AppColors.bordure, width: 0.6),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(formaterDate(v.dateEcheance), style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
-                Text(libelle, style: TextStyle(color: couleur, fontSize: 10)),
-              ],
+    final estPaye = v.statut == AppConstants.versementPaye;
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(10),
+      onTap: estPaye ? () => _modifierVersementPaye(v) : null,
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: AppColors.bordure, width: 0.6),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(formaterDate(v.dateEcheance), style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                  Text(libelle, style: TextStyle(color: couleur, fontSize: 10)),
+                ],
+              ),
             ),
-          ),
-          Text(
-            formaterMontant(v.montantPaye ?? v.montantPrevu, _devise),
-            style: TextStyle(
-              color: v.statut == AppConstants.versementPaye ? AppColors.succes : AppColors.texteNoir,
-              fontWeight: FontWeight.w600,
-              fontSize: 12,
+            Text(
+              formaterMontant(v.montantPaye ?? v.montantPrevu, _devise),
+              style: TextStyle(
+                color: estPaye ? AppColors.succes : AppColors.texteNoir,
+                fontWeight: FontWeight.w600,
+                fontSize: 12,
+              ),
             ),
-          ),
-          if (v.statut != AppConstants.versementPaye) ...[
-            const SizedBox(width: 8),
-            IconButton(
-              icon: const Icon(Icons.check_circle_outline, size: 20),
-              color: AppColors.succes,
-              onPressed: () => _validerVersement(v),
-            ),
+            if (!estPaye) ...[
+              const SizedBox(width: 8),
+              IconButton(
+                icon: const Icon(Icons.check_circle_outline, size: 20),
+                color: AppColors.succes,
+                onPressed: () => _validerVersement(v),
+              ),
+            ] else ...[
+              const SizedBox(width: 8),
+              Icon(Icons.edit_outlined, size: 16, color: AppColors.texteGris),
+            ],
           ],
-        ],
+        ),
       ),
     );
   }

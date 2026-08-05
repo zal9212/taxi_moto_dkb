@@ -4,10 +4,13 @@ import '../core/theme.dart';
 import '../models/depense.dart';
 import '../models/parametre.dart';
 import '../models/versement.dart';
+import '../services/backup_service.dart';
 import '../services/database_service.dart';
 import '../services/auth_service.dart';
+import '../services/excel_service.dart';
 import '../services/notification_service.dart';
 import '../services/pdf_service.dart';
+import 'lock_screen.dart';
 import 'stats_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -22,6 +25,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Parametre? _parametres;
   bool _biometrieDisponible = false;
   bool _generationRapportEnCours = false;
+  bool _sauvegardeEnCours = false;
+  bool _restaurationEnCours = false;
+  bool _exportExcelEnCours = false;
+  bool _importExcelEnCours = false;
 
   @override
   void initState() {
@@ -152,6 +159,194 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  Future<void> _exporterSauvegarde() async {
+    setState(() => _sauvegardeEnCours = true);
+    try {
+      await BackupService.exporter();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Erreur lors de l\'export : $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _sauvegardeEnCours = false);
+    }
+  }
+
+  Future<void> _restaurerSauvegarde() async {
+    final chemin = await BackupService.choisirFichierSauvegarde();
+    if (chemin == null || !mounted) return;
+
+    final confirme = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Restaurer cette sauvegarde ?'),
+        content: const Text(
+            'Toutes les donnees actuelles (motos, versements, depenses) seront '
+            'definitivement remplacees par celles de cette sauvegarde. Cette '
+            'action est irreversible.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Annuler')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: TextButton.styleFrom(foregroundColor: AppColors.danger),
+            child: const Text('Restaurer'),
+          ),
+        ],
+      ),
+    );
+    if (confirme != true) return;
+
+    setState(() => _restaurationEnCours = true);
+    try {
+      await BackupService.restaurer(chemin);
+      if (!mounted) return;
+      // Repart de l'ecran de verrouillage pour que tout l'etat de l'app
+      // (motos, reglages...) soit recharge depuis la base restauree.
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const LockScreen()),
+        (route) => false,
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Erreur lors de la restauration : $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _restaurationEnCours = false);
+    }
+  }
+
+  Future<void> _exporterExcel() async {
+    setState(() => _exportExcelEnCours = true);
+    try {
+      await ExcelService.exporter();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Erreur lors de l\'export Excel : $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _exportExcelEnCours = false);
+    }
+  }
+
+  Future<void> _importerExcel() async {
+    final chemin = await ExcelService.choisirFichierExcel();
+    if (chemin == null || !mounted) return;
+
+    final mode = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Mode d\'import'),
+        content: const Text(
+            'Ajouter/mettre a jour : cree les nouvelles lignes et met a jour '
+            'celles qui ont un ID existant, sans rien effacer.\n\n'
+            'Tout remplacer : efface toutes les donnees actuelles et les '
+            'remplace par le contenu du fichier.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, null), child: const Text('Annuler')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'fusion'),
+            child: const Text('Ajouter / mettre a jour'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'remplacement'),
+            style: TextButton.styleFrom(foregroundColor: AppColors.danger),
+            child: const Text('Tout remplacer'),
+          ),
+        ],
+      ),
+    );
+    if (mode == null || !mounted) return;
+
+    if (mode == 'remplacement') {
+      final confirme = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Tout remplacer ?'),
+          content: const Text(
+              'Toutes les donnees actuelles (motos, versements, depenses) seront '
+              'definitivement effacees et remplacees par celles du fichier Excel. '
+              'Cette action est irreversible.'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Annuler')),
+            TextButton(
+              onPressed: () => Navigator.pop(context, true),
+              style: TextButton.styleFrom(foregroundColor: AppColors.danger),
+              child: const Text('Remplacer'),
+            ),
+          ],
+        ),
+      );
+      if (confirme != true || !mounted) return;
+    }
+
+    setState(() => _importExcelEnCours = true);
+    try {
+      final rapport = await ExcelService.importer(chemin, remplacementComplet: mode == 'remplacement');
+      if (!mounted) return;
+      await _afficherRapportImportExcel(rapport);
+      if (!mounted) return;
+      // Repart de l'ecran de verrouillage pour que tout l'etat de l'app
+      // (motos, reglages...) soit recharge depuis les donnees importees.
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const LockScreen()),
+        (route) => false,
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Erreur lors de l\'import Excel : $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _importExcelEnCours = false);
+    }
+  }
+
+  Future<void> _afficherRapportImportExcel(RapportImportExcel rapport) async {
+    final resume = <String>[
+      if (rapport.motosCreees > 0) '${rapport.motosCreees} moto(s) creee(s)',
+      if (rapport.motosMisesAJour > 0) '${rapport.motosMisesAJour} moto(s) mise(s) a jour',
+      if (rapport.versementsCrees > 0) '${rapport.versementsCrees} versement(s) cree(s)',
+      if (rapport.versementsMisAJour > 0) '${rapport.versementsMisAJour} versement(s) mis a jour',
+      if (rapport.depensesCreees > 0) '${rapport.depensesCreees} depense(s) creee(s)',
+      if (rapport.depensesMisesAJour > 0) '${rapport.depensesMisesAJour} depense(s) mise(s) a jour',
+    ];
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(rapport.erreurs.isEmpty ? 'Import reussi' : 'Import termine avec des erreurs'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (resume.isEmpty)
+                const Text('Aucune ligne importee.')
+              else
+                ...resume.map((s) => Text('- $s')),
+              if (rapport.erreurs.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                Text('${rapport.erreurs.length} ligne(s) ignoree(s) :',
+                    style: const TextStyle(fontWeight: FontWeight.w600)),
+                const SizedBox(height: 4),
+                ...rapport.erreurs.take(10).map((e) => Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Text('- $e', style: const TextStyle(color: AppColors.danger, fontSize: 12)),
+                    )),
+                if (rapport.erreurs.length > 10) Text('... et ${rapport.erreurs.length - 10} autre(s).'),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('OK')),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_parametres == null) {
@@ -242,6 +437,73 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           _charger();
                         }
                       : null,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          _sectionTitre('Sauvegarde et restauration'),
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppColors.bordure, width: 0.6),
+            ),
+            child: Column(
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.backup_outlined, size: 20),
+                  title: const Text('Exporter mes donnees', style: TextStyle(fontSize: 13)),
+                  subtitle: const Text('Sauvegarde complete : motos, versements, depenses',
+                      style: TextStyle(fontSize: 10)),
+                  trailing: _sauvegardeEnCours
+                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.chevron_right, size: 18),
+                  onTap: _sauvegardeEnCours ? null : _exporterSauvegarde,
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.restore_outlined, size: 20),
+                  title: const Text('Restaurer une sauvegarde', style: TextStyle(fontSize: 13)),
+                  subtitle: const Text('Remplace toutes les donnees actuelles',
+                      style: TextStyle(fontSize: 10)),
+                  trailing: _restaurationEnCours
+                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.chevron_right, size: 18),
+                  onTap: _restaurationEnCours ? null : _restaurerSauvegarde,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          _sectionTitre('Export / import Excel'),
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppColors.bordure, width: 0.6),
+            ),
+            child: Column(
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.table_chart_outlined, size: 20),
+                  title: const Text('Exporter en Excel', style: TextStyle(fontSize: 13)),
+                  subtitle: const Text('Fichier .xlsx lisible et modifiable', style: TextStyle(fontSize: 10)),
+                  trailing: _exportExcelEnCours
+                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.chevron_right, size: 18),
+                  onTap: _exportExcelEnCours ? null : _exporterExcel,
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.upload_file_outlined, size: 20),
+                  title: const Text('Importer depuis Excel', style: TextStyle(fontSize: 13)),
+                  subtitle: const Text('Ajouter/mettre a jour, ou tout remplacer',
+                      style: TextStyle(fontSize: 10)),
+                  trailing: _importExcelEnCours
+                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.chevron_right, size: 18),
+                  onTap: _importExcelEnCours ? null : _importerExcel,
                 ),
               ],
             ),

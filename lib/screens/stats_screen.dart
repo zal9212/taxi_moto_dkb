@@ -7,7 +7,7 @@ import '../models/moto.dart';
 import '../services/database_service.dart';
 import '../utils/formatters.dart';
 
-enum _Periode { semaine, mois, annee }
+enum _Periode { semaine, mois, trimestre, semestre, annee }
 
 /// Vue d'ensemble des versements reçus, agrégés par semaine / mois / année,
 /// pour donner une vision complète de l'activité au fil du temps.
@@ -40,6 +40,10 @@ class _StatsScreenState extends State<StatsScreen> {
         return 'semaine';
       case _Periode.mois:
         return 'mois';
+      case _Periode.trimestre:
+        return 'trimestre';
+      case _Periode.semestre:
+        return 'semestre';
       case _Periode.annee:
         return 'annee';
     }
@@ -51,6 +55,10 @@ class _StatsScreenState extends State<StatsScreen> {
         return 8;
       case _Periode.mois:
         return 12;
+      case _Periode.trimestre:
+        return 8;
+      case _Periode.semestre:
+        return 6;
       case _Periode.annee:
         return 5;
     }
@@ -80,6 +88,12 @@ class _StatsScreenState extends State<StatsScreen> {
         return formaterDateCourte(d);
       case _Periode.mois:
         return '${_moisCourt(d.month)} ${d.year.toString().substring(2)}';
+      case _Periode.trimestre:
+        final trimestre = ((d.month - 1) ~/ 3) + 1;
+        return 'T$trimestre ${d.year.toString().substring(2)}';
+      case _Periode.semestre:
+        final semestre = d.month <= 6 ? 1 : 2;
+        return 'S$semestre ${d.year.toString().substring(2)}';
       case _Periode.annee:
         return d.year.toString();
     }
@@ -146,15 +160,15 @@ class _StatsScreenState extends State<StatsScreen> {
   Widget _selecteurPeriode() {
     Widget puce(String label, _Periode valeur) {
       final actif = _periode == valeur;
-      return Expanded(
+      return Padding(
+        padding: const EdgeInsets.only(right: 8),
         child: GestureDetector(
           onTap: () {
             setState(() => _periode = valeur);
             _charger();
           },
           child: Container(
-            margin: const EdgeInsets.only(right: 6),
-            padding: const EdgeInsets.symmetric(vertical: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
             decoration: BoxDecoration(
               color: actif ? AppColors.carteNoire : Colors.white,
               borderRadius: BorderRadius.circular(8),
@@ -168,12 +182,17 @@ class _StatsScreenState extends State<StatsScreen> {
       );
     }
 
-    return Row(
-      children: [
-        puce('Semaine', _Periode.semaine),
-        puce('Mois', _Periode.mois),
-        puce('Annee', _Periode.annee),
-      ],
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: [
+          puce('Semaine', _Periode.semaine),
+          puce('Mois', _Periode.mois),
+          puce('Trimestre', _Periode.trimestre),
+          puce('6 mois', _Periode.semestre),
+          puce('Annee', _Periode.annee),
+        ],
+      ),
     );
   }
 
@@ -228,6 +247,11 @@ class _StatsScreenState extends State<StatsScreen> {
       );
     }
 
+    // Largeur minimale par barre pour que son libelle (ex: "Sep 25") ait
+    // toujours la place de s'afficher sans chevaucher ses voisins, quel
+    // que soit le nombre de periodes affichees (jusqu'a 12 en vue Mois).
+    const largeurParBarre = 48.0;
+
     return Container(
       height: 220,
       padding: const EdgeInsets.fromLTRB(8, 16, 12, 8),
@@ -236,8 +260,22 @@ class _StatsScreenState extends State<StatsScreen> {
         borderRadius: BorderRadius.circular(14),
         border: Border.all(color: AppColors.bordure, width: 0.6),
       ),
-      child: BarChart(
-        BarChartData(
+      child: LayoutBuilder(
+        builder: (context, contraintes) {
+          final largeur = (_donnees.length * largeurParBarre).clamp(contraintes.maxWidth, double.infinity);
+          return SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            reverse: true, // affiche d'emblee les periodes les plus recentes
+            child: SizedBox(width: largeur, child: _barChart()),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _barChart() {
+    return BarChart(
+      BarChartData(
           maxY: _maxValeur * 1.2,
           alignment: BarChartAlignment.spaceAround,
           gridData: FlGridData(
@@ -294,7 +332,6 @@ class _StatsScreenState extends State<StatsScreen> {
             );
           }),
         ),
-      ),
     );
   }
 

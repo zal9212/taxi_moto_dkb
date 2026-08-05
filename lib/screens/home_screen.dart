@@ -15,6 +15,7 @@ import 'expenses_screen.dart';
 import 'settings_screen.dart';
 
 enum _FiltrePeriode { tout, ceMois, cetteAnnee }
+enum _TriMoto { recentes, nom, retard }
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -29,6 +30,8 @@ class _HomeScreenState extends State<HomeScreen> {
   int _ongletActif = 0;
   _FiltrePeriode _filtrePeriode = _FiltrePeriode.tout;
   int? _motoFiltreId; // null = toutes les motos
+  String _rechercheMotos = '';
+  _TriMoto _triMotos = _TriMoto.recentes;
 
   Parametre? _parametres;
   List<Moto> _motos = [];
@@ -75,7 +78,8 @@ class _HomeScreenState extends State<HomeScreen> {
       debut: bornes.debut,
       fin: bornes.fin,
     );
-    final totalEnRetard = await _db.totalEnRetard(motoId: _motoFiltreId);
+    final solde = await _db.soldeNet(motoId: _motoFiltreId);
+    final totalEnRetard = solde < 0 ? -solde : 0.0;
 
     final versementsRecents = await _db.listerVersementsRecents(
       motoId: _motoFiltreId,
@@ -351,8 +355,10 @@ class _HomeScreenState extends State<HomeScreen> {
         future: _chargerInfosMotos(),
         builder: (context, snapshot) {
           if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
-          final items = snapshot.data!;
-          if (items.isEmpty) {
+          final toutesLesMotos = snapshot.data!;
+          final items = _filtrerEtTrierMotos(toutesLesMotos);
+
+          if (toutesLesMotos.isEmpty) {
             return ListView(
               children: [
                 const SizedBox(height: 80),
@@ -364,29 +370,115 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             );
           }
-          return ListView.separated(
+
+          return ListView(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 90),
-            itemCount: items.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 10),
-            itemBuilder: (context, i) {
-              final item = items[i];
-              return MotoCard(
-                moto: item.moto,
-                totalVerse: item.totalVerse,
-                prochainVersement: item.prochain,
-                devise: devise,
-                onTap: () async {
-                  await Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (_) => MotoDetailScreen(motoId: item.moto.id!)),
-                  );
-                  _charger();
-                },
-              );
-            },
+            children: [
+              _barreRechercheEtTriMotos(),
+              const SizedBox(height: 12),
+              if (items.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 40),
+                  child: Center(
+                    child: Text('Aucun resultat pour cette recherche.',
+                        style: TextStyle(color: AppColors.texteGris, fontSize: 13)),
+                  ),
+                )
+              else
+                ...items.map((item) => Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: MotoCard(
+                        moto: item.moto,
+                        totalVerse: item.totalVerse,
+                        solde: item.solde,
+                        prochainVersement: item.prochain,
+                        devise: devise,
+                        onTap: () async {
+                          await Navigator.push(
+                            context,
+                            MaterialPageRoute(builder: (_) => MotoDetailScreen(motoId: item.moto.id!)),
+                          );
+                          _charger();
+                        },
+                      ),
+                    )),
+            ],
           );
         },
       ),
+    );
+  }
+
+  List<_MotoAvecInfos> _filtrerEtTrierMotos(List<_MotoAvecInfos> source) {
+    var items = source;
+
+    final q = _rechercheMotos.trim().toLowerCase();
+    if (q.isNotEmpty) {
+      items = items
+          .where((it) =>
+              it.moto.nom.toLowerCase().contains(q) || it.moto.chauffeur.toLowerCase().contains(q))
+          .toList();
+    }
+
+    items = [...items];
+    switch (_triMotos) {
+      case _TriMoto.nom:
+        items.sort((a, b) => a.moto.nom.toLowerCase().compareTo(b.moto.nom.toLowerCase()));
+        break;
+      case _TriMoto.retard:
+        // Solde le plus negatif (plus grosse dette) en premier.
+        items.sort((a, b) => a.solde.compareTo(b.solde));
+        break;
+      case _TriMoto.recentes:
+        break; // ordre deja fourni par listerMotos (date_creation DESC)
+    }
+    return items;
+  }
+
+  Widget _barreRechercheEtTriMotos() {
+    Widget puceTri(String label, _TriMoto valeur) {
+      final actif = _triMotos == valeur;
+      return Padding(
+        padding: const EdgeInsets.only(right: 8),
+        child: GestureDetector(
+          onTap: () => setState(() => _triMotos = valeur),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            decoration: BoxDecoration(
+              color: actif ? AppColors.carteNoire : Colors.white,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: actif ? AppColors.carteNoire : AppColors.bordure),
+            ),
+            child: Text(label,
+                style: TextStyle(color: actif ? Colors.white : AppColors.texteGris, fontSize: 11)),
+          ),
+        ),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        TextField(
+          onChanged: (v) => setState(() => _rechercheMotos = v),
+          decoration: const InputDecoration(
+            hintText: 'Rechercher une moto ou un chauffeur',
+            prefixIcon: Icon(Icons.search, size: 20),
+            isDense: true,
+          ),
+        ),
+        const SizedBox(height: 10),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            children: [
+              puceTri('Recentes', _TriMoto.recentes),
+              puceTri('Nom (A-Z)', _TriMoto.nom),
+              puceTri('Retard d\'abord', _TriMoto.retard),
+            ],
+          ),
+        ),
+      ],
     );
   }
 
@@ -395,8 +487,9 @@ class _HomeScreenState extends State<HomeScreen> {
     for (final moto in _motos) {
       if (moto.id == null) continue;
       final totalVerse = await _db.totalEncaisse(motoId: moto.id!);
+      final solde = await _db.soldeNet(motoId: moto.id!);
       final prochain = await _db.prochainVersement(moto.id!);
-      resultats.add(_MotoAvecInfos(moto: moto, totalVerse: totalVerse, prochain: prochain));
+      resultats.add(_MotoAvecInfos(moto: moto, totalVerse: totalVerse, solde: solde, prochain: prochain));
     }
     return resultats;
   }
@@ -421,7 +514,13 @@ class _ActiviteRecente {
 class _MotoAvecInfos {
   final Moto moto;
   final double totalVerse;
+  final double solde;
   final Versement? prochain;
 
-  _MotoAvecInfos({required this.moto, required this.totalVerse, required this.prochain});
+  _MotoAvecInfos({
+    required this.moto,
+    required this.totalVerse,
+    required this.solde,
+    required this.prochain,
+  });
 }

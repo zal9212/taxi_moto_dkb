@@ -24,9 +24,15 @@ class PdfService {
     final totalVerse = versements
         .where((v) => v.statut == AppConstants.versementPaye)
         .fold<double>(0, (s, v) => s + (v.montantPaye ?? 0));
-    final totalEnRetard = versements
-        .where((v) => v.statut == AppConstants.versementEnRetard)
+    // Solde net : compare ce qui a ete reellement verse a ce qui etait du
+    // pour toutes les echeances deja passees (paiements partiels et
+    // versements superieurs au montant prevu sont donc bien pris en compte,
+    // contrairement a une simple somme des echeances au statut "en_retard").
+    final aujourdHui = DateTime.now();
+    final totalDu = versements
+        .where((v) => !v.dateEcheance.isAfter(aujourdHui))
         .fold<double>(0, (s, v) => s + v.montantPrevu);
+    final solde = totalVerse - totalDu;
     final totalDepenses = depenses.fold<double>(0, (s, d) => s + d.montant);
 
     doc.addPage(
@@ -41,7 +47,13 @@ class PdfService {
           pw.Text('Chauffeur : ${moto.chauffeur}'),
           pw.Text('Montant par versement : ${moto.montantVersement.toStringAsFixed(0)} $deviseSymbole'),
           pw.Text('Total verse : ${totalVerse.toStringAsFixed(0)} $deviseSymbole'),
-          pw.Text('Total en retard : ${totalEnRetard.toStringAsFixed(0)} $deviseSymbole'),
+          pw.Text(
+            solde < 0
+                ? 'Solde : en retard de ${(-solde).toStringAsFixed(0)} $deviseSymbole'
+                : solde > 0
+                    ? 'Solde : en avance de ${solde.toStringAsFixed(0)} $deviseSymbole'
+                    : 'Solde : a jour',
+          ),
           pw.Text('Total depenses (huile, reparations...) : ${totalDepenses.toStringAsFixed(0)} $deviseSymbole'),
           pw.SizedBox(height: 16),
 
@@ -101,7 +113,9 @@ class PdfService {
 
     double totalGeneralVerse = 0;
     double totalGeneralRetard = 0;
+    double totalGeneralAvance = 0;
     double totalGeneralDepenses = 0;
+    final aujourdHui = DateTime.now();
 
     final lignes = motos.map((m) {
       final versements = m.id != null ? (versementsParMoto[m.id] ?? []) : <Versement>[];
@@ -109,13 +123,20 @@ class PdfService {
       final verse = versements
           .where((v) => v.statut == AppConstants.versementPaye)
           .fold<double>(0, (s, v) => s + (v.montantPaye ?? 0));
-      final retard = versements
-          .where((v) => v.statut == AppConstants.versementEnRetard)
+      // Solde net (voir genererEtPartagerReleve) : plus fiable qu'une simple
+      // somme des echeances au statut "en_retard", car il tient compte des
+      // paiements partiels et des versements superieurs au montant prevu.
+      final du = versements
+          .where((v) => !v.dateEcheance.isAfter(aujourdHui))
           .fold<double>(0, (s, v) => s + v.montantPrevu);
+      final solde = verse - du;
+      final retard = solde < 0 ? -solde : 0.0;
+      final avance = solde > 0 ? solde : 0.0;
       final dep = depenses.fold<double>(0, (s, d) => s + d.montant);
 
       totalGeneralVerse += verse;
       totalGeneralRetard += retard;
+      totalGeneralAvance += avance;
       totalGeneralDepenses += dep;
 
       return [
@@ -123,6 +144,7 @@ class PdfService {
         m.chauffeur,
         verse.toStringAsFixed(0),
         retard.toStringAsFixed(0),
+        avance.toStringAsFixed(0),
         dep.toStringAsFixed(0),
       ];
     }).toList();
@@ -139,7 +161,7 @@ class PdfService {
           pw.Text('Genere le ${_formaterDate(DateTime.now())}'),
           pw.SizedBox(height: 16),
           pw.Table.fromTextArray(
-            headers: ['Moto', 'Chauffeur', 'Total verse', 'En retard', 'Depenses'],
+            headers: ['Moto', 'Chauffeur', 'Total verse', 'En retard', 'En avance', 'Depenses'],
             data: lignes,
             cellStyle: const pw.TextStyle(fontSize: 9),
             headerStyle: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold),
@@ -150,6 +172,8 @@ class PdfService {
           pw.Text('Total general verse : ${totalGeneralVerse.toStringAsFixed(0)} $deviseSymbole',
               style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),
           pw.Text('Total general en retard : ${totalGeneralRetard.toStringAsFixed(0)} $deviseSymbole',
+              style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),
+          pw.Text('Total general en avance : ${totalGeneralAvance.toStringAsFixed(0)} $deviseSymbole',
               style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),
           pw.Text('Total general depenses : ${totalGeneralDepenses.toStringAsFixed(0)} $deviseSymbole',
               style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),

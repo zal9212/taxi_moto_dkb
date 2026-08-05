@@ -29,14 +29,33 @@ class DatabaseService {
   }
 
   Future<Database> _initDb() async {
-    final dbPath = await getDatabasesPath();
-    final path = join(dbPath, AppConstants.dbName);
+    final path = await cheminBaseDeDonnees();
     return openDatabase(
       path,
       version: AppConstants.dbVersion,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
+  }
+
+  /// Chemin du fichier SQLite sur le disque — utilise pour la
+  /// sauvegarde/restauration (copie brute du fichier).
+  Future<String> cheminBaseDeDonnees() async {
+    final dbPath = await getDatabasesPath();
+    return join(dbPath, AppConstants.dbName);
+  }
+
+  /// Ferme la connexion active. Necessaire avant de copier ou remplacer le
+  /// fichier de base (sauvegarde/restauration) pour garantir qu'aucune
+  /// ecriture n'est en cours et que le fichier sur disque est a jour.
+  /// La connexion est rouverte automatiquement au prochain acces via
+  /// [database].
+  Future<void> fermer() async {
+    final db = _db;
+    if (db != null) {
+      _db = null;
+      await db.close();
+    }
   }
 
   Future<void> _onCreate(Database db, int version) async {
@@ -159,9 +178,32 @@ class DatabaseService {
     return db.update('motos', moto.toMap(), where: 'id = ?', whereArgs: [moto.id]);
   }
 
-  Future<int> supprimerMoto(int id) async {
+  /// Supprime definitivement une moto ainsi que tout son historique
+  /// (versements, depenses). Irreversible : a n'appeler qu'apres
+  /// confirmation explicite de l'utilisateur.
+  ///
+  /// Note : les FOREIGN KEY ... ON DELETE CASCADE du schema ne sont pas
+  /// appliquees par sqflite (PRAGMA foreign_keys n'est jamais active ici),
+  /// donc le nettoyage des tables liees se fait explicitement ci-dessous.
+  Future<void> supprimerMoto(int id) async {
     final db = await database;
-    return db.delete('motos', where: 'id = ?', whereArgs: [id]);
+    await db.transaction((txn) async {
+      await txn.delete('versements', where: 'moto_id = ?', whereArgs: [id]);
+      await txn.delete('depenses', where: 'moto_id = ?', whereArgs: [id]);
+      await txn.delete('motos', where: 'id = ?', whereArgs: [id]);
+    });
+  }
+
+  /// Supprime TOUTES les motos, versements et depenses (utilise pour un
+  /// import Excel en mode "remplacement complet"). Les reglages et les
+  /// categories de depenses sont conserves. Irreversible.
+  Future<void> viderToutesLesDonnees() async {
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.delete('versements');
+      await txn.delete('depenses');
+      await txn.delete('motos');
+    });
   }
 
   Future<List<Moto>> listerMotos({String? statut}) async {
@@ -218,6 +260,42 @@ class DatabaseService {
       montantPaye: montantPaye ?? v.montantPrevu,
     );
     await modifierVersement(vMisAJour);
+  }
+
+  /// Corrige le montant reellement recu pour un versement deja valide
+  /// (erreur de saisie du gerant), sans toucher a son statut ni sa date
+  /// de validation.
+  Future<void> modifierMontantPaye(int versementId, double nouveauMontant) async {
+    final db = await database;
+    await db.update(
+      'versements',
+      {'montant_paye': nouveauMontant},
+      where: 'id = ?',
+      whereArgs: [versementId],
+    );
+  }
+
+  /// Annule la validation d'un versement marque paye par erreur : il
+  /// redevient "en_attente", ou "en_retard" si son echeance est deja
+  /// passee.
+  Future<void> annulerValidationVersement(int versementId) async {
+    final db = await database;
+    final maps = await db.query('versements', where: 'id = ?', whereArgs: [versementId]);
+    if (maps.isEmpty) return;
+    final v = Versement.fromMap(maps.first);
+    final nouveauStatut = v.dateEcheance.isBefore(DateTime.now())
+        ? AppConstants.versementEnRetard
+        : AppConstants.versementEnAttente;
+    await db.update(
+      'versements',
+      {
+        'statut': nouveauStatut,
+        'date_validation': null,
+        'montant_paye': null,
+      },
+      where: 'id = ?',
+      whereArgs: [versementId],
+    );
   }
 
   /// Recalcule les statuts "en_attente" -> "en_retard" pour les échéances
@@ -318,19 +396,42 @@ class DatabaseService {
     return (result.first['total'] as num).toDouble();
   }
 
-  Future<double> totalEnRetard({int? motoId}) async {
+  /// Solde net (d'une moto si [motoId] est fourni, sinon global) : positif
+  /// si plus a ete verse que ce qui etait du jusqu'a aujourd'hui (avance),
+  /// negatif si de l'argent est du (retard). A la difference d'une simple
+  /// somme des echeances au statut "en_retard", ce calcul tient aussi
+  /// compte des versements partiels sur des echeances marquees payees
+  /// (le manque n'est alors plus "perdu") et des versements superieurs au
+  /// montant prevu (le credit se reporte sur les echeances suivantes).
+  Future<double> soldeNet({int? motoId}) async {
     final db = await database;
-    final conditions = <String>["statut = ?"];
-    final args = <dynamic>[AppConstants.versementEnRetard];
+    final aujourdHui = DateTime.now().toIso8601String();
+
+    final recuConditions = <String>['statut = ?'];
+    final recuArgs = <dynamic>[AppConstants.versementPaye];
     if (motoId != null) {
-      conditions.add('moto_id = ?');
-      args.add(motoId);
+      recuConditions.add('moto_id = ?');
+      recuArgs.add(motoId);
     }
-    final result = await db.rawQuery(
-      'SELECT COALESCE(SUM(montant_prevu), 0) as total FROM versements WHERE ${conditions.join(' AND ')}',
-      args,
+    final recu = await db.rawQuery(
+      'SELECT COALESCE(SUM(montant_paye), 0) as total FROM versements WHERE ${recuConditions.join(' AND ')}',
+      recuArgs,
     );
-    return (result.first['total'] as num).toDouble();
+
+    final duConditions = <String>['date_echeance <= ?'];
+    final duArgs = <dynamic>[aujourdHui];
+    if (motoId != null) {
+      duConditions.add('moto_id = ?');
+      duArgs.add(motoId);
+    }
+    final du = await db.rawQuery(
+      'SELECT COALESCE(SUM(montant_prevu), 0) as total FROM versements WHERE ${duConditions.join(' AND ')}',
+      duArgs,
+    );
+
+    final totalRecu = (recu.first['total'] as num).toDouble();
+    final totalDu = (du.first['total'] as num).toDouble();
+    return totalRecu - totalDu;
   }
 
   /// Total des versements reçus (payés), regroupé par période, pour les
@@ -351,6 +452,10 @@ class DatabaseService {
         case 'semaine':
           final lundi = d.subtract(Duration(days: d.weekday - 1));
           return DateTime(lundi.year, lundi.month, lundi.day);
+        case 'trimestre':
+          return DateTime(d.year, ((d.month - 1) ~/ 3) * 3 + 1);
+        case 'semestre':
+          return DateTime(d.year, d.month <= 6 ? 1 : 7);
         case 'annee':
           return DateTime(d.year);
         case 'mois':
@@ -363,6 +468,10 @@ class DatabaseService {
       switch (periode) {
         case 'semaine':
           return cle.subtract(const Duration(days: 7));
+        case 'trimestre':
+          return DateTime(cle.year, cle.month - 3);
+        case 'semestre':
+          return DateTime(cle.year, cle.month - 6);
         case 'annee':
           return DateTime(cle.year - 1);
         case 'mois':

@@ -41,6 +41,11 @@ dependencies:
   # minimale via FlutterNativeSplash.preserve()/remove())
   flutter_native_splash: ^2.4.3
 
+  # Sauvegarde / restauration locale des donnees
+  share_plus: ^10.0.0
+  file_picker: ^8.0.0
+  excel: ^4.0.6
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
