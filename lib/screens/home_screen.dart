@@ -313,7 +313,7 @@ class _HomeScreenState extends State<HomeScreen> {
       },
       itemBuilder: (context) => [
         const PopupMenuItem(value: null, child: Text('Toutes les motos')),
-        ..._motos.map((m) => PopupMenuItem(value: m.id, child: Text(m.nom))),
+        ..._motos.map((m) => PopupMenuItem(value: m.id, child: Text('${m.nom} - ${m.chauffeur}'))),
       ],
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
@@ -328,7 +328,8 @@ class _HomeScreenState extends State<HomeScreen> {
             Text(
               _motoFiltreId != null
                   ? (_motos.where((m) => m.id == _motoFiltreId).isNotEmpty
-                      ? _motos.firstWhere((m) => m.id == _motoFiltreId).nom
+                      ? '${_motos.firstWhere((m) => m.id == _motoFiltreId).nom} - '
+                          '${_motos.firstWhere((m) => m.id == _motoFiltreId).chauffeur}'
                       : 'Moto')
                   : 'Moto',
               style: TextStyle(

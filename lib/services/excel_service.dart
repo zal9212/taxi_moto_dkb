@@ -159,14 +159,12 @@ class ExcelService {
     final horodatage = DateTime.now();
     final nomFichier = 'moto_taxi_douka_${_isoCompact(horodatage)}.xlsx';
 
-    // Le FileProvider de share_plus n'expose que le sous-dossier
-    // "share_plus/" du cache (meme contrainte que pour la sauvegarde .db).
+    // share_plus copie lui-meme le fichier fourni dans son propre dossier
+    // de cache interne ("<cache>/share_plus/") avant de le partager ; lui
+    // donner un fichier deja place dedans le fait refuser (meme contrainte
+    // que pour la sauvegarde .db, voir BackupService.exporter()).
     final dossierTemp = await getTemporaryDirectory();
-    final dossierPartage = Directory(p.join(dossierTemp.path, 'share_plus'));
-    if (!await dossierPartage.exists()) {
-      await dossierPartage.create(recursive: true);
-    }
-    final cheminExport = p.join(dossierPartage.path, nomFichier);
+    final cheminExport = p.join(dossierTemp.path, nomFichier);
     await File(cheminExport).writeAsBytes(bytes);
 
     await Share.shareXFiles(

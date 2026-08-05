@@ -31,15 +31,13 @@ class BackupService {
         '${horodatage.year}${_deuxChiffres(horodatage.month)}${_deuxChiffres(horodatage.day)}_'
         '${_deuxChiffres(horodatage.hour)}${_deuxChiffres(horodatage.minute)}.db';
 
-    // Le FileProvider de share_plus n'expose que le sous-dossier
-    // "share_plus/" du cache (voir flutter_share_file_paths.xml du plugin) :
-    // le fichier a partager doit imperativement y etre place.
+    // share_plus copie lui-meme le fichier fourni dans son propre dossier
+    // de cache interne ("<cache>/share_plus/") avant de le partager. Si on
+    // lui donne directement un fichier deja place dans ce dossier, il
+    // refuse (il serait efface par son propre nettoyage) : il faut donc
+    // ecrire l'export ailleurs, dans le dossier temporaire normal.
     final dossierTemp = await getTemporaryDirectory();
-    final dossierPartage = Directory(p.join(dossierTemp.path, 'share_plus'));
-    if (!await dossierPartage.exists()) {
-      await dossierPartage.create(recursive: true);
-    }
-    final cheminExport = p.join(dossierPartage.path, nomFichier);
+    final cheminExport = p.join(dossierTemp.path, nomFichier);
     await fichierSource.copy(cheminExport);
 
     await Share.shareXFiles(

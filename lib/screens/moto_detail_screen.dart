@@ -141,12 +141,26 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     );
     if (confirme != true || _moto?.id == null) return;
 
-    for (final v in _versements) {
-      if (v.id != null) await NotificationService.annulerRappel(v.id!);
+    try {
+      for (final v in _versements) {
+        if (v.id != null) {
+          // L'annulation du rappel est secondaire : si elle echoue (plugin
+          // de notifications), la suppression de la moto ne doit pas etre
+          // bloquee pour autant.
+          try {
+            await NotificationService.annulerRappel(v.id!);
+          } catch (_) {}
+        }
+      }
+      await _db.supprimerMoto(_moto!.id!);
+      if (!mounted) return;
+      Navigator.pop(context);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Erreur lors de la suppression : $e')));
+      }
     }
-    await _db.supprimerMoto(_moto!.id!);
-    if (!mounted) return;
-    Navigator.pop(context);
   }
 
   /// Corrige le montant d'un versement deja valide, ou annule sa

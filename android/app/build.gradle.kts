@@ -36,6 +36,14 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+
+            // Le "code shrinking" (R8) casse la (de)serialisation Gson interne
+            // de flutter_local_notifications (TypeToken generique strippe),
+            // ce qui fait planter la creation de moto des qu'un rappel est
+            // programme. Desactive explicitement : cette app est petite,
+            // le gain de taille d'APK n'en vaut pas la casse.
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
     }
 }
