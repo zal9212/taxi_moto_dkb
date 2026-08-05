@@ -37,18 +37,23 @@ dependencies:
   # Graphiques (statistiques des versements)
   fl_chart: ^0.69.0
 
+  # Ecran de demarrage (utilise a l'execution pour controler sa duree
+  # minimale via FlutterNativeSplash.preserve()/remove())
+  flutter_native_splash: ^2.4.3
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^4.0.0
   flutter_launcher_icons: ^0.14.1
-  flutter_native_splash: ^2.4.3
 
 flutter:
   uses-material-design: true
   assets:
     - assets/icon/logo_app.png
     - assets/icon/splash_app.png
+    - assets/icon/splash_icon_android12.png
+    - assets/icon/splash_branding.png
 
 flutter_launcher_icons:
   android: true
@@ -66,7 +71,13 @@ flutter_native_splash:
   image: assets/icon/splash_app.png
   android_12:
     color: "#090808"
-    image: assets/icon/splash_app.png
+    # Sur Android 12+, l'image est systematiquement decoupee dans un
+    # cercle par l'OS (contrainte de la SplashScreen API, non
+    # contournable) : on y met donc uniquement l'icone (deja circulaire)
+    # et le texte "MOTO TAXI DOUKA" passe par le "branding", affiche
+    # sous forme de rectangle non decoupe en bas de l'ecran.
+    image: assets/icon/splash_icon_android12.png
+    branding: assets/icon/splash_branding.png
   android: true
   ios: true
   web: false
