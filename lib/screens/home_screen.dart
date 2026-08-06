@@ -106,11 +106,13 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
       ...depensesRecentes.map(
         (d) => _ActiviteRecente(
-          titre: '${categories[d.categorieId]?.nom ?? 'Depense'} - ${motosParId[d.motoId]?.nom ?? ''}',
+          titre: 'Depense - ${categories[d.categorieId]?.nom ?? 'Depense'} - '
+              '${motosParId[d.motoId]?.nom ?? ''} - ${motosParId[d.motoId]?.chauffeur ?? ''}',
           date: d.date,
           montant: d.montant,
           estPositif: false,
           icone: Icons.build_outlined,
+          motoId: d.motoId,
         ),
       ),
     ]..sort((a, b) => b.date.compareTo(a.date));
@@ -513,8 +515,8 @@ class _ActiviteRecente {
   final double montant;
   final bool estPositif;
   final IconData icone;
-  /// Renseigne uniquement pour les versements : permet de rendre la ligne
-  /// cliquable vers le detail de la moto concernee. Null pour les depenses.
+  /// Permet de rendre la ligne cliquable vers le detail de la moto
+  /// concernee (versement ou depense).
   final int? motoId;
 
   _ActiviteRecente({
