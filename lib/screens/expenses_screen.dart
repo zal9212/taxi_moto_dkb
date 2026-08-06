@@ -85,7 +85,7 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
                         const SizedBox(width: 8),
                         ..._motos.map((m) => Padding(
                               padding: const EdgeInsets.only(right: 8),
-                              child: _puce(m.nom, _filtreMotoId == m.id, () {
+                              child: _puce('${m.nom} - ${m.chauffeur}', _filtreMotoId == m.id, () {
                                 setState(() => _filtreMotoId = m.id);
                                 _charger();
                               }),

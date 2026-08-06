@@ -78,7 +78,7 @@ class _AddExpenseScreenState extends State<AddExpenseScreen> {
             DropdownButtonFormField<int>(
               initialValue: _motoId,
               decoration: const InputDecoration(labelText: 'Moto concernee'),
-              items: _motos.map((m) => DropdownMenuItem(value: m.id, child: Text(m.nom))).toList(),
+              items: _motos.map((m) => DropdownMenuItem(value: m.id, child: Text('${m.nom} - ${m.chauffeur}'))).toList(),
               onChanged: (v) => setState(() => _motoId = v),
               validator: (v) => v == null ? 'Selectionnez une moto' : null,
             ),

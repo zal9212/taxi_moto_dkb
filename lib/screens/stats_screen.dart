@@ -204,7 +204,7 @@ class _StatsScreenState extends State<StatsScreen> {
           _puceMoto('Toutes les motos', null),
           ..._motos.map((m) => Padding(
                 padding: const EdgeInsets.only(left: 8),
-                child: _puceMoto(m.nom, m.id),
+                child: _puceMoto('${m.nom} - ${m.chauffeur}', m.id),
               )),
         ],
       ),

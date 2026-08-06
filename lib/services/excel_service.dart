@@ -46,8 +46,11 @@ class RapportImportExcel {
 /// Feuilles generees : "Motos", "Versements", "Depenses". La colonne "ID"
 /// identifie une ligne existante (mise a jour) ; laissee vide, elle cree
 /// un nouvel enregistrement. Les versements/depenses referencent leur
-/// moto par son NOM (pas par ID interne), pour rester modifiables a la
-/// main sans connaitre les identifiants internes.
+/// moto par "Moto ID" (colonne "ID" de la feuille Motos) — colonne
+/// prioritaire et fiable meme si plusieurs motos portent le meme nom —
+/// avec le nom affiche a cote juste pour la lisibilite humaine. Si
+/// "Moto ID" est vide (ex: ligne ajoutee a la main pour une moto elle
+/// aussi nouvellement creee dans le meme fichier), le nom sert de repli.
 class ExcelService {
   ExcelService._();
 
@@ -98,6 +101,7 @@ class ExcelService {
     final sVersements = excel[_feuilleVersements];
     sVersements.appendRow([
       TextCellValue('ID'),
+      TextCellValue('Moto ID'),
       TextCellValue('Moto'),
       TextCellValue('Date echeance'),
       TextCellValue('Date validation'),
@@ -109,9 +113,14 @@ class ExcelService {
     for (final m in motos) {
       if (m.id == null) continue;
       final versements = await db.listerVersementsParMoto(m.id!);
-      for (final v in versements) {
+      // Seuls les versements reellement effectues sont exportes : les
+      // echeances en attente/en retard ne sont pas encore de l'argent
+      // recu, et sont de toute facon regenerees automatiquement par
+      // assurerEcheances() (fenetre glissante) au premier chargement.
+      for (final v in versements.where((v) => v.statut == AppConstants.versementPaye)) {
         sVersements.appendRow([
           v.id != null ? IntCellValue(v.id!) : null,
+          IntCellValue(v.motoId),
           TextCellValue(motosParId[v.motoId]?.nom ?? ''),
           TextCellValue(_iso(v.dateEcheance)),
           v.dateValidation != null ? TextCellValue(_iso(v.dateValidation!)) : null,
@@ -126,6 +135,7 @@ class ExcelService {
     final sDepenses = excel[_feuilleDepenses];
     sDepenses.appendRow([
       TextCellValue('ID'),
+      TextCellValue('Moto ID'),
       TextCellValue('Moto'),
       TextCellValue('Categorie'),
       TextCellValue('Montant'),
@@ -138,6 +148,7 @@ class ExcelService {
       for (final d in depenses) {
         sDepenses.appendRow([
           d.id != null ? IntCellValue(d.id!) : null,
+          IntCellValue(d.motoId),
           TextCellValue(motosParId[d.motoId]?.nom ?? ''),
           TextCellValue(categoriesParId[d.categorieId]?.nom ?? ''),
           DoubleCellValue(d.montant),
@@ -169,8 +180,8 @@ class ExcelService {
 
     await Share.shareXFiles(
       [XFile(cheminExport)],
-      subject: 'Export Excel Moto Taxi Douka',
-      text: 'Export Excel Moto Taxi Douka du ${_formaterDate(horodatage)}',
+      subject: 'Export Excel Douka Moto',
+      text: 'Export Excel Douka Moto du ${_formaterDate(horodatage)}',
     );
   }
 
@@ -215,13 +226,20 @@ class ExcelService {
       await db.viderToutesLesDonnees();
     }
 
-    // nom (minuscules) -> id, pour resoudre les references des feuilles
-    // Versements/Depenses vers une moto (existante ou creee pendant cet
-    // import).
+    // nom (minuscules) -> id, utilise en repli si une ligne Versements/
+    // Depenses ne precise pas de "Moto ID" (ex: ligne ajoutee a la main).
     final idMotoParNom = <String, int>{
       for (final m in await db.listerMotos())
         if (m.id != null) m.nom.toLowerCase(): m.id!
     };
+    // ID moto tel qu'ecrit dans le fichier (colonne "ID" de la feuille
+    // Motos) -> ID reel en base apres import. Reference prioritaire et non
+    // ambigue pour les feuilles Versements/Depenses, y compris quand
+    // plusieurs motos partagent le meme nom (le nom seul ne suffirait pas
+    // a les distinguer). En mode remplacement, les ID du fichier ne
+    // correspondent plus a rien en base : cette table sert alors juste a
+    // relier les lignes entre elles au sein du meme fichier.
+    final idMotoFichierVersDb = <int, int>{};
 
     for (var i = 1; i < sMotos.maxRows; i++) {
       final ligne = sMotos.rows[i];
@@ -293,6 +311,8 @@ class ExcelService {
           rapport.motosCreees++;
         }
         idMotoParNom[nom.toLowerCase()] = idFinal;
+        final idFichier = idTxte != null ? int.tryParse(idTxte) : null;
+        if (idFichier != null) idMotoFichierVersDb[idFichier] = idFinal;
       } catch (e) {
         rapport.erreurs.add(LigneErreurImport(_feuilleMotos, numeroLigne, 'Erreur inattendue : $e'));
       }
@@ -313,22 +333,32 @@ class ExcelService {
         final numeroLigne = i + 1;
         try {
           final idTxte = _texte(_valeur(ligne, 0));
-          final motoNom = _texte(_valeur(ligne, 1));
-          final dateEcheanceTxt = _texte(_valeur(ligne, 2));
-          final dateValidationTxt = _texte(_valeur(ligne, 3));
-          final montantPrevuTxt = _texte(_valeur(ligne, 4));
-          final montantPayeTxt = _texte(_valeur(ligne, 5));
-          final statut = _texte(_valeur(ligne, 6));
-          final notes = _texte(_valeur(ligne, 7));
+          final motoIdTxte = _texte(_valeur(ligne, 1));
+          final motoNom = _texte(_valeur(ligne, 2));
+          final dateEcheanceTxt = _texte(_valeur(ligne, 3));
+          final dateValidationTxt = _texte(_valeur(ligne, 4));
+          final montantPrevuTxt = _texte(_valeur(ligne, 5));
+          final montantPayeTxt = _texte(_valeur(ligne, 6));
+          final statut = _texte(_valeur(ligne, 7));
+          final notes = _texte(_valeur(ligne, 8));
 
-          if (motoNom == null || dateEcheanceTxt == null || montantPrevuTxt == null || statut == null) {
+          if ((motoIdTxte == null && motoNom == null) ||
+              dateEcheanceTxt == null ||
+              montantPrevuTxt == null ||
+              statut == null) {
             rapport.erreurs.add(LigneErreurImport(_feuilleVersements, numeroLigne,
-                'Champs obligatoires manquants (Moto, Date echeance, Montant prevu, Statut).'));
+                'Champs obligatoires manquants (Moto ID ou Moto, Date echeance, Montant prevu, Statut).'));
             continue;
           }
-          final motoId = idMotoParNom[motoNom.toLowerCase()];
+          // "Moto ID" est prioritaire : fiable meme si plusieurs motos
+          // partagent le meme nom. Le nom ne sert de repli que si aucun
+          // "Moto ID" n'est fourni (ligne ajoutee a la main).
+          final motoIdFichier = motoIdTxte != null ? int.tryParse(motoIdTxte) : null;
+          final motoId = (motoIdFichier != null ? idMotoFichierVersDb[motoIdFichier] : null) ??
+              (motoNom != null ? idMotoParNom[motoNom.toLowerCase()] : null);
           if (motoId == null) {
-            rapport.erreurs.add(LigneErreurImport(_feuilleVersements, numeroLigne, 'Moto "$motoNom" introuvable.'));
+            rapport.erreurs.add(LigneErreurImport(
+                _feuilleVersements, numeroLigne, 'Moto introuvable (ID "$motoIdTxte" / nom "$motoNom").'));
             continue;
           }
           if (![AppConstants.versementEnAttente, AppConstants.versementPaye, AppConstants.versementEnRetard]
@@ -383,20 +413,27 @@ class ExcelService {
         final numeroLigne = i + 1;
         try {
           final idTxte = _texte(_valeur(ligne, 0));
-          final motoNom = _texte(_valeur(ligne, 1));
-          final categorieNom = _texte(_valeur(ligne, 2));
-          final montantTxt = _texte(_valeur(ligne, 3));
-          final dateTxt = _texte(_valeur(ligne, 4));
-          final description = _texte(_valeur(ligne, 5));
+          final motoIdTxte = _texte(_valeur(ligne, 1));
+          final motoNom = _texte(_valeur(ligne, 2));
+          final categorieNom = _texte(_valeur(ligne, 3));
+          final montantTxt = _texte(_valeur(ligne, 4));
+          final dateTxt = _texte(_valeur(ligne, 5));
+          final description = _texte(_valeur(ligne, 6));
 
-          if (motoNom == null || categorieNom == null || montantTxt == null || dateTxt == null) {
-            rapport.erreurs.add(LigneErreurImport(
-                _feuilleDepenses, numeroLigne, 'Champs obligatoires manquants (Moto, Categorie, Montant, Date).'));
+          if ((motoIdTxte == null && motoNom == null) ||
+              categorieNom == null ||
+              montantTxt == null ||
+              dateTxt == null) {
+            rapport.erreurs.add(LigneErreurImport(_feuilleDepenses, numeroLigne,
+                'Champs obligatoires manquants (Moto ID ou Moto, Categorie, Montant, Date).'));
             continue;
           }
-          final motoId = idMotoParNom[motoNom.toLowerCase()];
+          final motoIdFichier = motoIdTxte != null ? int.tryParse(motoIdTxte) : null;
+          final motoId = (motoIdFichier != null ? idMotoFichierVersDb[motoIdFichier] : null) ??
+              (motoNom != null ? idMotoParNom[motoNom.toLowerCase()] : null);
           if (motoId == null) {
-            rapport.erreurs.add(LigneErreurImport(_feuilleDepenses, numeroLigne, 'Moto "$motoNom" introuvable.'));
+            rapport.erreurs.add(LigneErreurImport(
+                _feuilleDepenses, numeroLigne, 'Moto introuvable (ID "$motoIdTxte" / nom "$motoNom").'));
             continue;
           }
           var categorieId = idCategorieParNom[categorieNom.toLowerCase()];

@@ -512,7 +512,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _sectionTitre('A propos'),
           const Padding(
             padding: EdgeInsets.symmetric(horizontal: 4),
-            child: Text('Moto Taxi Douka - v1.0.0\nDonnees stockees localement sur cet appareil.',
+            child: Text('Douka Moto - v1.0.0\nDonnees stockees localement sur cet appareil.',
                 style: TextStyle(color: AppColors.texteGris, fontSize: 11)),
           ),
         ],

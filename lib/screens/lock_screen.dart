@@ -13,7 +13,13 @@ import 'setup_pin_screen.dart';
 /// Si aucun PIN n'a encore été configuré, l'app passe directement à
 /// l'accueil (protection optionnelle, activable depuis les Réglages).
 class LockScreen extends StatefulWidget {
-  const LockScreen({super.key});
+  /// true quand cet ecran est affiche par-dessus l'app (deja lancee) pour
+  /// la reverrouiller au retour au premier plan : un deverrouillage reussi
+  /// doit alors simplement reveler l'ecran precedent (pop), pas repartir
+  /// sur un nouvel accueil.
+  final bool estReverrouillage;
+
+  const LockScreen({super.key, this.estReverrouillage = false});
 
   @override
   State<LockScreen> createState() => _LockScreenState();
@@ -86,6 +92,10 @@ class _LockScreenState extends State<LockScreen> {
 
   void _allerVersAccueil() {
     if (!mounted) return;
+    if (widget.estReverrouillage) {
+      Navigator.of(context).pop();
+      return;
+    }
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(builder: (_) => const HomeScreen()),
     );
@@ -134,6 +144,15 @@ class _LockScreenState extends State<LockScreen> {
 
   @override
   Widget build(BuildContext context) {
+    return PopScope(
+      // Reverrouillage : le bouton/geste retour ne doit pas permettre de
+      // contourner l'ecran et reveler l'app sans authentification.
+      canPop: !widget.estReverrouillage,
+      child: _construireContenu(context),
+    );
+  }
+
+  Widget _construireContenu(BuildContext context) {
     if (_verificationEnCours) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
@@ -164,7 +183,7 @@ class _LockScreenState extends State<LockScreen> {
                         size: 48,
                       ),
                       const SizedBox(height: 16),
-                      const Text('Moto Taxi Douka',
+                      const Text('Douka Moto',
                           style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600)),
                       const SizedBox(height: 4),
                       Padding(

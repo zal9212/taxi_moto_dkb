@@ -42,8 +42,8 @@ class BackupService {
 
     await Share.shareXFiles(
       [XFile(cheminExport)],
-      subject: 'Sauvegarde Moto Taxi Douka',
-      text: 'Sauvegarde Moto Taxi Douka du ${_formaterDate(horodatage)}',
+      subject: 'Sauvegarde Douka Moto',
+      text: 'Sauvegarde Douka Moto du ${_formaterDate(horodatage)}',
     );
   }
 
