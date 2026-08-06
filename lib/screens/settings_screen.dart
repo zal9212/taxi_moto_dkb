@@ -24,6 +24,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _db = DatabaseService.instance;
   Parametre? _parametres;
   bool _biometrieDisponible = false;
+  bool _pinConfigure = false;
   bool _generationRapportEnCours = false;
   bool _sauvegardeEnCours = false;
   bool _restaurationEnCours = false;
@@ -39,10 +40,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _charger() async {
     final p = await _db.obtenirParametres();
     final bioDispo = await AuthService.biometrieDisponible();
+    final pinConfigure = await AuthService.pinConfigure();
     if (!mounted) return;
     setState(() {
       _parametres = p;
       _biometrieDisponible = bioDispo;
+      _pinConfigure = pinConfigure;
     });
   }
 
@@ -122,13 +125,48 @@ class _SettingsScreenState extends State<SettingsScreen> {
         controleur1.text.length == 4 &&
         controleur1.text == controleur2.text) {
       await AuthService.definirPin(controleur1.text);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Code PIN mis a jour')));
-      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Code PIN mis a jour')));
+      _charger();
     } else if (ok == true) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Les codes ne correspondent pas')));
       }
+    }
+  }
+
+  Future<void> _desactiverPin() async {
+    final confirme = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Desactiver le code PIN ?'),
+        content: const Text(
+            'L\'application ne demandera plus de code (ni d\'empreinte/Face ID) '
+            'a l\'ouverture. Vos donnees ne seront plus protegees par un verrouillage.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Annuler')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: TextButton.styleFrom(foregroundColor: AppColors.danger),
+            child: const Text('Desactiver'),
+          ),
+        ],
+      ),
+    );
+    if (confirme != true) return;
+
+    // La biometrie s'appuie sur le PIN comme secours (voir AuthService) :
+    // sans PIN, elle n'a plus de sens et doit etre desactivee avec lui.
+    await AuthService.activerBiometrie(false);
+    await AuthService.supprimerPin();
+    _charger();
+  }
+
+  Future<void> _basculerPin(bool activer) async {
+    if (activer) {
+      await _changerPin();
+    } else {
+      await _desactiverPin();
     }
   }
 
@@ -416,22 +454,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             child: Column(
               children: [
+                SwitchListTile(
+                  secondary: const Icon(Icons.pin_outlined, size: 20),
+                  title: const Text('Code PIN', style: TextStyle(fontSize: 13)),
+                  subtitle: !_pinConfigure
+                      ? const Text('App non protegee - activez pour securiser vos donnees',
+                          style: TextStyle(fontSize: 10))
+                      : null,
+                  value: _pinConfigure,
+                  activeColor: AppColors.accentLime,
+                  onChanged: _basculerPin,
+                ),
+                const Divider(height: 1),
                 ListTile(
-                  leading: const Icon(Icons.pin_outlined, size: 20),
+                  enabled: _pinConfigure,
+                  leading: const Icon(Icons.edit_outlined, size: 20),
                   title: const Text('Modifier le code PIN', style: TextStyle(fontSize: 13)),
                   trailing: const Icon(Icons.chevron_right, size: 18),
-                  onTap: _changerPin,
+                  onTap: _pinConfigure ? _changerPin : null,
                 ),
                 const Divider(height: 1),
                 SwitchListTile(
                   secondary: const Icon(Icons.fingerprint, size: 20),
                   title: const Text('Empreinte / Face ID', style: TextStyle(fontSize: 13)),
-                  subtitle: !_biometrieDisponible
-                      ? const Text('Non disponible sur cet appareil', style: TextStyle(fontSize: 10))
-                      : null,
+                  subtitle: !_pinConfigure
+                      ? const Text('Necessite le code PIN', style: TextStyle(fontSize: 10))
+                      : !_biometrieDisponible
+                          ? const Text('Non disponible sur cet appareil', style: TextStyle(fontSize: 10))
+                          : null,
                   value: p.biometrieActive,
                   activeColor: AppColors.accentLime,
-                  onChanged: _biometrieDisponible
+                  onChanged: _pinConfigure && _biometrieDisponible
                       ? (v) async {
                           await AuthService.activerBiometrie(v);
                           _charger();

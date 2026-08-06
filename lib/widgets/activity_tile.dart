@@ -10,6 +10,7 @@ class ActivityTile extends StatelessWidget {
   final double montant;
   final bool estPositif; // vert (versement encaisse) ou rouge (depense)
   final String devise;
+  final VoidCallback? onTap;
 
   const ActivityTile({
     super.key,
@@ -19,6 +20,7 @@ class ActivityTile extends StatelessWidget {
     required this.montant,
     required this.estPositif,
     required this.devise,
+    this.onTap,
   });
 
   @override
@@ -27,31 +29,39 @@ class ActivityTile extends StatelessWidget {
     final couleurFond = estPositif ? AppColors.succesFond : AppColors.dangerFond;
     final signe = estPositif ? '+' : '-';
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      child: Row(
-        children: [
-          Container(
-            width: 34,
-            height: 34,
-            decoration: BoxDecoration(color: couleurFond, shape: BoxShape.circle),
-            child: Icon(icone, color: couleur, size: 16),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(titre, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
-                Text(formaterDate(date), style: TextStyle(color: AppColors.texteGris, fontSize: 10)),
-              ],
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Row(
+          children: [
+            Container(
+              width: 34,
+              height: 34,
+              decoration: BoxDecoration(color: couleurFond, shape: BoxShape.circle),
+              child: Icon(icone, color: couleur, size: 16),
             ),
-          ),
-          Text(
-            '$signe${formaterMontant(montant, devise)}',
-            style: TextStyle(color: couleur, fontSize: 12, fontWeight: FontWeight.w600),
-          ),
-        ],
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(titre, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                  Text(formaterDate(date), style: TextStyle(color: AppColors.texteGris, fontSize: 10)),
+                ],
+              ),
+            ),
+            Text(
+              '$signe${formaterMontant(montant, devise)}',
+              style: TextStyle(color: couleur, fontSize: 12, fontWeight: FontWeight.w600),
+            ),
+            if (onTap != null) ...[
+              const SizedBox(width: 4),
+              Icon(Icons.chevron_right, size: 16, color: AppColors.texteGris),
+            ],
+          ],
+        ),
       ),
     );
   }

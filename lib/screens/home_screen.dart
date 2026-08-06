@@ -95,11 +95,13 @@ class _HomeScreenState extends State<HomeScreen> {
     final activites = <_ActiviteRecente>[
       ...versementsRecents.where((v) => v.statut == AppConstants.versementPaye).map(
             (v) => _ActiviteRecente(
-              titre: '${motosParId[v.motoId]?.nom ?? 'Moto'} - versement',
+              titre: 'Versement - ${motosParId[v.motoId]?.nom ?? 'Moto'} - '
+                  '${motosParId[v.motoId]?.chauffeur ?? ''}',
               date: v.dateValidation ?? v.dateEcheance,
               montant: v.montantPaye ?? v.montantPrevu,
               estPositif: true,
               icone: Icons.check_circle_outline,
+              motoId: v.motoId,
             ),
           ),
       ...depensesRecentes.map(
@@ -208,6 +210,15 @@ class _HomeScreenState extends State<HomeScreen> {
                   montant: a.montant,
                   estPositif: a.estPositif,
                   devise: devise,
+                  onTap: a.motoId == null
+                      ? null
+                      : () async {
+                          await Navigator.push(
+                            context,
+                            MaterialPageRoute(builder: (_) => MotoDetailScreen(motoId: a.motoId!)),
+                          );
+                          _charger();
+                        },
                 )),
         ],
       ),
@@ -502,6 +513,9 @@ class _ActiviteRecente {
   final double montant;
   final bool estPositif;
   final IconData icone;
+  /// Renseigne uniquement pour les versements : permet de rendre la ligne
+  /// cliquable vers le detail de la moto concernee. Null pour les depenses.
+  final int? motoId;
 
   _ActiviteRecente({
     required this.titre,
@@ -509,6 +523,7 @@ class _ActiviteRecente {
     required this.montant,
     required this.estPositif,
     required this.icone,
+    this.motoId,
   });
 }
 
