@@ -7,7 +7,7 @@ class AppConstants {
   AppConstants._();
 
   static const String dbName = 'moto_taxi_douka.db';
-  static const int dbVersion = 3;
+  static const int dbVersion = 4;
 
   // Valeurs par défaut au premier lancement (modifiables ensuite)
   static const String devisePardDefaut = 'FG';
@@ -49,23 +49,6 @@ class AppConstants {
   // telles quelles.
   // ---------------------------------------------------------------------
 
-  // Niveau d'un champ personnalise
-  static const String niveauChampEntite = 'entite';
-  static const String niveauChampTransaction = 'transaction';
-
-  // Type d'un champ personnalise
-  static const String typeChampTexte = 'texte';
-  static const String typeChampMontant = 'montant';
-  static const String typeChampDate = 'date';
-  static const String typeChampListe = 'liste';
-
-  static const List<String> typesChampDisponibles = [
-    typeChampTexte,
-    typeChampMontant,
-    typeChampDate,
-    typeChampListe,
-  ];
-
   // Type d'une transaction generique (revenu/depense d'une entite)
   static const String transactionRevenu = 'revenu';
   static const String transactionDepense = 'depense';
@@ -79,4 +62,14 @@ class AppConstants {
     '#B5860A', // ambre
     '#C8F169', // vert lime
   ];
+
+  // ---------------------------------------------------------------------
+  // Suivi des dettes personnelles ("quelqu'un me doit de l'argent") :
+  // fonctionnalite dediee et separee du moteur generique de categories,
+  // avec un lien optionnel vers une moto ou une entite de categorie.
+  // ---------------------------------------------------------------------
+
+  // Type de lien optionnel d'une dette (null = aucun lien, dette independante)
+  static const String detteLienMoto = 'moto';
+  static const String detteLienCategorieEntite = 'categorie_entite';
 }

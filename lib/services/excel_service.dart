@@ -7,7 +7,11 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../core/constants.dart';
+import '../models/categorie_activite.dart';
+import '../models/categorie_entite.dart';
+import '../models/categorie_transaction.dart';
 import '../models/depense.dart';
+import '../models/dette.dart';
 import '../models/moto.dart';
 import '../models/versement.dart';
 import 'database_service.dart';
@@ -38,6 +42,28 @@ class RapportImportExcel {
 
   int get totalTraite =>
       motosCreees + motosMisesAJour + versementsCrees + versementsMisAJour + depensesCreees + depensesMisesAJour;
+}
+
+/// Resultat d'un import Excel pour une categorie d'activite (ex: Boutiques).
+class RapportImportCategorie {
+  int entitesCreees = 0;
+  int entitesMisesAJour = 0;
+  int transactionsCreees = 0;
+  int transactionsMisesAJour = 0;
+  final List<LigneErreurImport> erreurs = [];
+
+  int get totalTraite => entitesCreees + entitesMisesAJour + transactionsCreees + transactionsMisesAJour;
+}
+
+/// Resultat d'un import Excel pour les dettes.
+class RapportImportDettes {
+  int dettesCreees = 0;
+  int dettesMisesAJour = 0;
+  int remboursementsCrees = 0;
+  int remboursementsMisAJour = 0;
+  final List<LigneErreurImport> erreurs = [];
+
+  int get totalTraite => dettesCreees + dettesMisesAJour + remboursementsCrees + remboursementsMisAJour;
 }
 
 /// Export et import des donnees (motos, versements, depenses) au format
@@ -471,6 +497,487 @@ class ExcelService {
           }
         } catch (e) {
           rapport.erreurs.add(LigneErreurImport(_feuilleDepenses, numeroLigne, 'Erreur inattendue : $e'));
+        }
+      }
+    }
+
+    return rapport;
+  }
+
+  // -------------------------------------------------------------------
+  // EXPORT / IMPORT - Categorie d'activite (ex: Boutiques)
+  // -------------------------------------------------------------------
+
+  static const _feuilleEntites = 'Entites';
+  static const _feuilleTransactions = 'Transactions';
+
+  /// Exporte les entites et transactions d'une seule categorie (chaque
+  /// categorie a sa propre devise, jamais melangee avec une autre).
+  static Future<void> exporterCategorie(CategorieActivite categorie) async {
+    final db = DatabaseService.instance;
+    final entites = await db.listerEntitesCategorie(categorie.id!);
+    final entitesParId = {for (final e in entites) e.id: e};
+    final transactions = await db.listerTransactionsCategorie(categorie.id!);
+
+    final excel = Excel.createExcel();
+    final feuilleParDefaut = excel.getDefaultSheet();
+
+    final sEntites = excel[_feuilleEntites];
+    sEntites.appendRow([
+      TextCellValue('ID'),
+      TextCellValue('Nom'),
+      TextCellValue('Statut'),
+      TextCellValue('Notes'),
+    ]);
+    for (final e in entites) {
+      sEntites.appendRow([
+        e.id != null ? IntCellValue(e.id!) : null,
+        TextCellValue(e.nom),
+        TextCellValue(e.statut),
+        e.notes != null ? TextCellValue(e.notes!) : null,
+      ]);
+    }
+
+    final sTransactions = excel[_feuilleTransactions];
+    sTransactions.appendRow([
+      TextCellValue('ID'),
+      TextCellValue('Entite ID'),
+      TextCellValue('Entite'),
+      TextCellValue('Type'),
+      TextCellValue('Montant'),
+      TextCellValue('Date'),
+      TextCellValue('Description'),
+    ]);
+    for (final t in transactions) {
+      sTransactions.appendRow([
+        t.id != null ? IntCellValue(t.id!) : null,
+        IntCellValue(t.entiteId),
+        TextCellValue(entitesParId[t.entiteId]?.nom ?? ''),
+        TextCellValue(t.type),
+        DoubleCellValue(t.montant),
+        TextCellValue(_iso(t.date)),
+        t.description != null ? TextCellValue(t.description!) : null,
+      ]);
+    }
+
+    if (feuilleParDefaut != null && feuilleParDefaut != _feuilleEntites) {
+      excel.delete(feuilleParDefaut);
+    }
+
+    final bytes = excel.encode();
+    if (bytes == null) {
+      throw Exception('Echec de la generation du fichier Excel.');
+    }
+
+    final horodatage = DateTime.now();
+    final nomFichierSuffixe = categorie.nom.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '_');
+    final nomFichier = 'douka_${nomFichierSuffixe}_${_isoCompact(horodatage)}.xlsx';
+
+    final dossierTemp = await getTemporaryDirectory();
+    final cheminExport = p.join(dossierTemp.path, nomFichier);
+    await File(cheminExport).writeAsBytes(bytes);
+
+    await Share.shareXFiles(
+      [XFile(cheminExport)],
+      subject: 'Export Excel ${categorie.nom}',
+      text: 'Export Excel ${categorie.nom} du ${_formaterDate(horodatage)}',
+    );
+  }
+
+  /// Importe un fichier Excel genere par [exporterCategorie] dans une
+  /// categorie precise (les entites/transactions importees lui sont
+  /// rattachees, peu importe la categorie d'origine du fichier).
+  static Future<RapportImportCategorie> importerCategorie(
+    String cheminFichier,
+    int categorieId, {
+    required bool remplacementComplet,
+  }) async {
+    final bytes = await File(cheminFichier).readAsBytes();
+    final excel = Excel.decodeBytes(bytes);
+    final rapport = RapportImportCategorie();
+
+    final sEntites = excel.tables[_feuilleEntites];
+    if (sEntites == null) {
+      throw Exception('Feuille "$_feuilleEntites" introuvable dans ce fichier.');
+    }
+
+    final db = DatabaseService.instance;
+
+    if (remplacementComplet) {
+      await db.viderDonneesCategorie(categorieId);
+    }
+
+    final idEntiteParNom = <String, int>{
+      for (final e in await db.listerEntitesCategorie(categorieId))
+        if (e.id != null) e.nom.toLowerCase(): e.id!
+    };
+    final idEntiteFichierVersDb = <int, int>{};
+
+    for (var i = 1; i < sEntites.maxRows; i++) {
+      final ligne = sEntites.rows[i];
+      if (_ligneVide(ligne)) continue;
+      final numeroLigne = i + 1;
+      try {
+        final idTxte = _texte(_valeur(ligne, 0));
+        final nom = _texte(_valeur(ligne, 1));
+        final statut = _texte(_valeur(ligne, 2)) ?? AppConstants.motoActive;
+        final notes = _texte(_valeur(ligne, 3));
+
+        if (nom == null) {
+          rapport.erreurs.add(LigneErreurImport(_feuilleEntites, numeroLigne, 'Champ obligatoire manquant (Nom).'));
+          continue;
+        }
+        if (![AppConstants.motoActive, AppConstants.motoSuspendue, AppConstants.motoArchivee].contains(statut)) {
+          rapport.erreurs.add(LigneErreurImport(_feuilleEntites, numeroLigne, 'Statut invalide : "$statut".'));
+          continue;
+        }
+
+        final idFourni = !remplacementComplet && idTxte != null ? int.tryParse(idTxte) : null;
+        final entite = CategorieEntite(
+          id: idFourni,
+          categorieId: categorieId,
+          nom: nom,
+          statut: statut,
+          notes: notes,
+        );
+
+        int idFinal;
+        var misAJour = false;
+        if (entite.id != null) {
+          final lignesAffectees = await db.modifierEntiteCategorie(entite);
+          misAJour = lignesAffectees > 0;
+        }
+        if (misAJour) {
+          idFinal = entite.id!;
+          rapport.entitesMisesAJour++;
+        } else {
+          idFinal = await db.insererEntiteCategorie(entite);
+          rapport.entitesCreees++;
+        }
+        idEntiteParNom[nom.toLowerCase()] = idFinal;
+        final idFichier = idTxte != null ? int.tryParse(idTxte) : null;
+        if (idFichier != null) idEntiteFichierVersDb[idFichier] = idFinal;
+      } catch (e) {
+        rapport.erreurs.add(LigneErreurImport(_feuilleEntites, numeroLigne, 'Erreur inattendue : $e'));
+      }
+    }
+
+    final sTransactions = excel.tables[_feuilleTransactions];
+    if (sTransactions != null) {
+      for (var i = 1; i < sTransactions.maxRows; i++) {
+        final ligne = sTransactions.rows[i];
+        if (_ligneVide(ligne)) continue;
+        final numeroLigne = i + 1;
+        try {
+          final idTxte = _texte(_valeur(ligne, 0));
+          final entiteIdTxte = _texte(_valeur(ligne, 1));
+          final entiteNom = _texte(_valeur(ligne, 2));
+          final type = _texte(_valeur(ligne, 3));
+          final montantTxt = _texte(_valeur(ligne, 4));
+          final dateTxt = _texte(_valeur(ligne, 5));
+          final description = _texte(_valeur(ligne, 6));
+
+          if ((entiteIdTxte == null && entiteNom == null) || type == null || montantTxt == null || dateTxt == null) {
+            rapport.erreurs.add(LigneErreurImport(_feuilleTransactions, numeroLigne,
+                'Champs obligatoires manquants (Entite ID ou Entite, Type, Montant, Date).'));
+            continue;
+          }
+          final entiteIdFichier = entiteIdTxte != null ? int.tryParse(entiteIdTxte) : null;
+          final entiteId = (entiteIdFichier != null ? idEntiteFichierVersDb[entiteIdFichier] : null) ??
+              (entiteNom != null ? idEntiteParNom[entiteNom.toLowerCase()] : null);
+          if (entiteId == null) {
+            rapport.erreurs.add(LigneErreurImport(
+                _feuilleTransactions, numeroLigne, 'Entite introuvable (ID "$entiteIdTxte" / nom "$entiteNom").'));
+            continue;
+          }
+          if (![AppConstants.transactionRevenu, AppConstants.transactionDepense].contains(type)) {
+            rapport.erreurs.add(LigneErreurImport(_feuilleTransactions, numeroLigne, 'Type invalide : "$type".'));
+            continue;
+          }
+          final montant = double.tryParse(montantTxt);
+          final date = DateTime.tryParse(dateTxt);
+          if (montant == null || date == null) {
+            rapport.erreurs.add(LigneErreurImport(_feuilleTransactions, numeroLigne, 'Montant ou date invalide.'));
+            continue;
+          }
+
+          final idFourni = !remplacementComplet && idTxte != null ? int.tryParse(idTxte) : null;
+          final transaction = CategorieTransaction(
+            id: idFourni,
+            entiteId: entiteId,
+            type: type,
+            montant: montant,
+            date: date,
+            description: description,
+          );
+
+          var misAJour = false;
+          if (transaction.id != null) {
+            final lignesAffectees = await db.modifierTransactionCategorie(transaction);
+            misAJour = lignesAffectees > 0;
+          }
+          if (misAJour) {
+            rapport.transactionsMisesAJour++;
+          } else {
+            await db.insererTransactionCategorie(transaction);
+            rapport.transactionsCreees++;
+          }
+        } catch (e) {
+          rapport.erreurs.add(LigneErreurImport(_feuilleTransactions, numeroLigne, 'Erreur inattendue : $e'));
+        }
+      }
+    }
+
+    return rapport;
+  }
+
+  // -------------------------------------------------------------------
+  // EXPORT / IMPORT - Dettes
+  // -------------------------------------------------------------------
+
+  static const _feuilleDettes = 'Dettes';
+  static const _feuilleRemboursements = 'Remboursements';
+
+  static Future<void> exporterDettes() async {
+    final db = DatabaseService.instance;
+    final dettes = await db.listerDettes();
+
+    // Noms lisibles des liens (moto ou entite de categorie), juste pour
+    // affichage humain a cote des ID qui font foi.
+    final motos = await db.listerMotos();
+    final motosParId = {for (final m in motos) m.id: m};
+
+    final excel = Excel.createExcel();
+    final feuilleParDefaut = excel.getDefaultSheet();
+
+    final sDettes = excel[_feuilleDettes];
+    sDettes.appendRow([
+      TextCellValue('ID'),
+      TextCellValue('Nom personne'),
+      TextCellValue('Montant initial'),
+      TextCellValue('Date'),
+      TextCellValue('Notes'),
+      TextCellValue('Lien type'),
+      TextCellValue('Lien ID'),
+      TextCellValue('Lien nom'),
+    ]);
+    for (final d in dettes) {
+      String? lienNom;
+      if (d.lienType == AppConstants.detteLienMoto && d.lienId != null) {
+        lienNom = motosParId[d.lienId]?.nom;
+      } else if (d.lienType == AppConstants.detteLienCategorieEntite && d.lienId != null) {
+        final entite = await db.obtenirEntiteCategorie(d.lienId!);
+        lienNom = entite?.nom;
+      }
+      sDettes.appendRow([
+        d.id != null ? IntCellValue(d.id!) : null,
+        TextCellValue(d.nomPersonne),
+        DoubleCellValue(d.montantInitial),
+        TextCellValue(_iso(d.date)),
+        d.notes != null ? TextCellValue(d.notes!) : null,
+        d.lienType != null ? TextCellValue(d.lienType!) : null,
+        d.lienId != null ? IntCellValue(d.lienId!) : null,
+        lienNom != null ? TextCellValue(lienNom) : null,
+      ]);
+    }
+
+    final sRemboursements = excel[_feuilleRemboursements];
+    sRemboursements.appendRow([
+      TextCellValue('ID'),
+      TextCellValue('Dette ID'),
+      TextCellValue('Nom personne'),
+      TextCellValue('Montant'),
+      TextCellValue('Date'),
+      TextCellValue('Notes'),
+    ]);
+    for (final d in dettes) {
+      if (d.id == null) continue;
+      final remboursements = await db.listerRemboursements(d.id!);
+      for (final r in remboursements) {
+        sRemboursements.appendRow([
+          r.id != null ? IntCellValue(r.id!) : null,
+          IntCellValue(r.detteId),
+          TextCellValue(d.nomPersonne),
+          DoubleCellValue(r.montant),
+          TextCellValue(_iso(r.date)),
+          r.notes != null ? TextCellValue(r.notes!) : null,
+        ]);
+      }
+    }
+
+    if (feuilleParDefaut != null && feuilleParDefaut != _feuilleDettes) {
+      excel.delete(feuilleParDefaut);
+    }
+
+    final bytes = excel.encode();
+    if (bytes == null) {
+      throw Exception('Echec de la generation du fichier Excel.');
+    }
+
+    final horodatage = DateTime.now();
+    final nomFichier = 'douka_dettes_${_isoCompact(horodatage)}.xlsx';
+
+    final dossierTemp = await getTemporaryDirectory();
+    final cheminExport = p.join(dossierTemp.path, nomFichier);
+    await File(cheminExport).writeAsBytes(bytes);
+
+    await Share.shareXFiles(
+      [XFile(cheminExport)],
+      subject: 'Export Excel Dettes',
+      text: 'Export Excel Dettes du ${_formaterDate(horodatage)}',
+    );
+  }
+
+  /// Importe un fichier Excel genere par [exporterDettes]. "Lien ID" doit
+  /// etre un ID de moto ou d'entite de categorie deja existant en base
+  /// (ces donnees ne sont pas touchees par cet import) : si introuvable,
+  /// la dette est importee sans lien plutot que rejetee.
+  static Future<RapportImportDettes> importerDettes(
+    String cheminFichier, {
+    required bool remplacementComplet,
+  }) async {
+    final bytes = await File(cheminFichier).readAsBytes();
+    final excel = Excel.decodeBytes(bytes);
+    final rapport = RapportImportDettes();
+
+    final sDettes = excel.tables[_feuilleDettes];
+    if (sDettes == null) {
+      throw Exception('Feuille "$_feuilleDettes" introuvable dans ce fichier.');
+    }
+
+    final db = DatabaseService.instance;
+
+    if (remplacementComplet) {
+      await db.viderDettes();
+    }
+
+    final motosIds = (await db.listerMotos()).map((m) => m.id).whereType<int>().toSet();
+    final idDetteFichierVersDb = <int, int>{};
+
+    for (var i = 1; i < sDettes.maxRows; i++) {
+      final ligne = sDettes.rows[i];
+      if (_ligneVide(ligne)) continue;
+      final numeroLigne = i + 1;
+      try {
+        final idTxte = _texte(_valeur(ligne, 0));
+        final nomPersonne = _texte(_valeur(ligne, 1));
+        final montantTxt = _texte(_valeur(ligne, 2));
+        final dateTxt = _texte(_valeur(ligne, 3));
+        final notes = _texte(_valeur(ligne, 4));
+        final lienType = _texte(_valeur(ligne, 5));
+        final lienIdTxt = _texte(_valeur(ligne, 6));
+
+        if (nomPersonne == null || montantTxt == null || dateTxt == null) {
+          rapport.erreurs.add(LigneErreurImport(
+              _feuilleDettes, numeroLigne, 'Champs obligatoires manquants (Nom personne, Montant initial, Date).'));
+          continue;
+        }
+        final montant = double.tryParse(montantTxt);
+        final date = DateTime.tryParse(dateTxt);
+        if (montant == null || date == null) {
+          rapport.erreurs.add(LigneErreurImport(_feuilleDettes, numeroLigne, 'Montant initial ou date invalide.'));
+          continue;
+        }
+
+        String? lienTypeFinal;
+        int? lienIdFinal;
+        final lienId = lienIdTxt != null ? int.tryParse(lienIdTxt) : null;
+        if (lienType == AppConstants.detteLienMoto && lienId != null && motosIds.contains(lienId)) {
+          lienTypeFinal = lienType;
+          lienIdFinal = lienId;
+        } else if (lienType == AppConstants.detteLienCategorieEntite && lienId != null) {
+          final entite = await db.obtenirEntiteCategorie(lienId);
+          if (entite != null) {
+            lienTypeFinal = lienType;
+            lienIdFinal = lienId;
+          }
+        }
+
+        final idFourni = !remplacementComplet && idTxte != null ? int.tryParse(idTxte) : null;
+        final dette = Dette(
+          id: idFourni,
+          nomPersonne: nomPersonne,
+          montantInitial: montant,
+          date: date,
+          notes: notes,
+          lienType: lienTypeFinal,
+          lienId: lienIdFinal,
+        );
+
+        int idFinal;
+        var misAJour = false;
+        if (dette.id != null) {
+          final lignesAffectees = await db.modifierDette(dette);
+          misAJour = lignesAffectees > 0;
+        }
+        if (misAJour) {
+          idFinal = dette.id!;
+          rapport.dettesMisesAJour++;
+        } else {
+          idFinal = await db.insererDette(dette);
+          rapport.dettesCreees++;
+        }
+        final idFichier = idTxte != null ? int.tryParse(idTxte) : null;
+        if (idFichier != null) idDetteFichierVersDb[idFichier] = idFinal;
+      } catch (e) {
+        rapport.erreurs.add(LigneErreurImport(_feuilleDettes, numeroLigne, 'Erreur inattendue : $e'));
+      }
+    }
+
+    final sRemboursements = excel.tables[_feuilleRemboursements];
+    if (sRemboursements != null) {
+      for (var i = 1; i < sRemboursements.maxRows; i++) {
+        final ligne = sRemboursements.rows[i];
+        if (_ligneVide(ligne)) continue;
+        final numeroLigne = i + 1;
+        try {
+          final idTxte = _texte(_valeur(ligne, 0));
+          final detteIdTxte = _texte(_valeur(ligne, 1));
+          final montantTxt = _texte(_valeur(ligne, 3));
+          final dateTxt = _texte(_valeur(ligne, 4));
+          final notes = _texte(_valeur(ligne, 5));
+
+          if (detteIdTxte == null || montantTxt == null || dateTxt == null) {
+            rapport.erreurs.add(LigneErreurImport(
+                _feuilleRemboursements, numeroLigne, 'Champs obligatoires manquants (Dette ID, Montant, Date).'));
+            continue;
+          }
+          final detteIdFichier = int.tryParse(detteIdTxte);
+          final detteId = detteIdFichier != null ? idDetteFichierVersDb[detteIdFichier] : null;
+          if (detteId == null) {
+            rapport.erreurs
+                .add(LigneErreurImport(_feuilleRemboursements, numeroLigne, 'Dette introuvable (ID "$detteIdTxte").'));
+            continue;
+          }
+          final montant = double.tryParse(montantTxt);
+          final date = DateTime.tryParse(dateTxt);
+          if (montant == null || date == null) {
+            rapport.erreurs.add(LigneErreurImport(_feuilleRemboursements, numeroLigne, 'Montant ou date invalide.'));
+            continue;
+          }
+
+          final idFourni = !remplacementComplet && idTxte != null ? int.tryParse(idTxte) : null;
+          final remboursement = DetteRemboursement(
+            id: idFourni,
+            detteId: detteId,
+            montant: montant,
+            date: date,
+            notes: notes,
+          );
+
+          var misAJour = false;
+          if (remboursement.id != null) {
+            final lignesAffectees = await db.modifierRemboursement(remboursement);
+            misAJour = lignesAffectees > 0;
+          }
+          if (misAJour) {
+            rapport.remboursementsMisAJour++;
+          } else {
+            await db.insererRemboursement(remboursement);
+            rapport.remboursementsCrees++;
+          }
+        } catch (e) {
+          rapport.erreurs.add(LigneErreurImport(_feuilleRemboursements, numeroLigne, 'Erreur inattendue : $e'));
         }
       }
     }

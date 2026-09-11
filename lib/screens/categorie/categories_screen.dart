@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../core/theme.dart';
 import '../../models/categorie_activite.dart';
 import '../../services/database_service.dart';
+import '../../services/excel_service.dart';
 import '../../utils/couleur_utils.dart';
 import '../home_screen.dart';
 import 'categorie_home_screen.dart';
@@ -24,6 +25,8 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
   List<CategorieActivite> _categories = [];
   int? _categorieActiveId;
   bool _chargement = true;
+  int? _exportEnCoursId;
+  int? _importEnCoursId;
 
   @override
   void initState() {
@@ -87,6 +90,125 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
     _charger();
   }
 
+  Future<void> _exporterCategorie(CategorieActivite c) async {
+    if (c.id == null) return;
+    setState(() => _exportEnCoursId = c.id);
+    try {
+      await ExcelService.exporterCategorie(c);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erreur lors de l\'export Excel : $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _exportEnCoursId = null);
+    }
+  }
+
+  Future<void> _importerCategorie(CategorieActivite c) async {
+    if (c.id == null) return;
+    final chemin = await ExcelService.choisirFichierExcel();
+    if (chemin == null || !mounted) return;
+
+    final mode = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Mode d\'import'),
+        content: Text(
+            'Ajouter/mettre a jour : cree les nouvelles entites/operations et met a '
+            'jour celles qui ont un ID existant, sans rien effacer.\n\n'
+            'Tout remplacer : efface toutes les entites/operations actuelles de '
+            '"${c.nom}" et les remplace par le contenu du fichier.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, null), child: const Text('Annuler')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'fusion'),
+            child: const Text('Ajouter / mettre a jour'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'remplacement'),
+            style: TextButton.styleFrom(foregroundColor: AppColors.danger),
+            child: const Text('Tout remplacer'),
+          ),
+        ],
+      ),
+    );
+    if (mode == null || !mounted) return;
+
+    if (mode == 'remplacement') {
+      final confirme = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Tout remplacer ?'),
+          content: Text(
+              'Toutes les entites et operations actuelles de "${c.nom}" seront '
+              'definitivement effacees et remplacees par celles du fichier Excel. '
+              'Cette action est irreversible.'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Annuler')),
+            TextButton(
+              onPressed: () => Navigator.pop(context, true),
+              style: TextButton.styleFrom(foregroundColor: AppColors.danger),
+              child: const Text('Remplacer'),
+            ),
+          ],
+        ),
+      );
+      if (confirme != true || !mounted) return;
+    }
+
+    setState(() => _importEnCoursId = c.id);
+    try {
+      final rapport = await ExcelService.importerCategorie(chemin, c.id!, remplacementComplet: mode == 'remplacement');
+      if (!mounted) return;
+      await _afficherRapportImportCategorie(rapport);
+      _charger();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Erreur lors de l\'import Excel : $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _importEnCoursId = null);
+    }
+  }
+
+  Future<void> _afficherRapportImportCategorie(RapportImportCategorie rapport) async {
+    final resume = <String>[
+      if (rapport.entitesCreees > 0) '${rapport.entitesCreees} entite(s) creee(s)',
+      if (rapport.entitesMisesAJour > 0) '${rapport.entitesMisesAJour} entite(s) mise(s) a jour',
+      if (rapport.transactionsCreees > 0) '${rapport.transactionsCreees} operation(s) creee(s)',
+      if (rapport.transactionsMisesAJour > 0) '${rapport.transactionsMisesAJour} operation(s) mise(s) a jour',
+    ];
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(rapport.erreurs.isEmpty ? 'Import reussi' : 'Import termine avec des erreurs'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (resume.isEmpty) const Text('Aucune ligne importee.') else ...resume.map((s) => Text('- $s')),
+              if (rapport.erreurs.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                Text('${rapport.erreurs.length} ligne(s) ignoree(s) :',
+                    style: const TextStyle(fontWeight: FontWeight.w600)),
+                const SizedBox(height: 4),
+                ...rapport.erreurs.take(10).map((e) => Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Text('- $e', style: const TextStyle(color: AppColors.danger, fontSize: 12)),
+                    )),
+                if (rapport.erreurs.length > 10) Text('... et ${rapport.erreurs.length - 10} autre(s).'),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('OK')),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -125,6 +247,10 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
                           _charger();
                         },
                         onSupprimer: () => _supprimerCategorie(c),
+                        onExporter: () => _exporterCategorie(c),
+                        onImporter: () => _importerCategorie(c),
+                        exportEnCours: _exportEnCoursId == c.id,
+                        importEnCours: _importEnCoursId == c.id,
                       ),
                     )),
               ],
@@ -150,6 +276,10 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
     required VoidCallback onTap,
     VoidCallback? onModifier,
     VoidCallback? onSupprimer,
+    VoidCallback? onExporter,
+    VoidCallback? onImporter,
+    bool exportEnCours = false,
+    bool importEnCours = false,
   }) {
     return InkWell(
       onTap: onTap,
@@ -180,14 +310,23 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
                 decoration: BoxDecoration(color: AppColors.succesFond, borderRadius: BorderRadius.circular(6)),
                 child: Text('Active', style: TextStyle(color: AppColors.succes, fontSize: 9, fontWeight: FontWeight.w600)),
               ),
-            if (onModifier != null || onSupprimer != null)
+            if (exportEnCours || importEnCours)
+              const Padding(
+                padding: EdgeInsets.only(left: 8),
+                child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+              )
+            else if (onModifier != null || onSupprimer != null || onExporter != null || onImporter != null)
               PopupMenuButton<String>(
                 onSelected: (v) {
                   if (v == 'modifier') onModifier?.call();
                   if (v == 'supprimer') onSupprimer?.call();
+                  if (v == 'exporter') onExporter?.call();
+                  if (v == 'importer') onImporter?.call();
                 },
                 itemBuilder: (context) => [
                   if (onModifier != null) const PopupMenuItem(value: 'modifier', child: Text('Modifier')),
+                  if (onExporter != null) const PopupMenuItem(value: 'exporter', child: Text('Exporter Excel')),
+                  if (onImporter != null) const PopupMenuItem(value: 'importer', child: Text('Importer Excel')),
                   if (onSupprimer != null)
                     PopupMenuItem(
                       value: 'supprimer',

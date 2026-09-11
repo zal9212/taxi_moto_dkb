@@ -3,9 +3,9 @@ import 'package:sqflite/sqflite.dart';
 
 import '../core/constants.dart';
 import '../models/categorie_activite.dart';
-import '../models/categorie_champ.dart';
 import '../models/categorie_entite.dart';
 import '../models/categorie_transaction.dart';
+import '../models/dette.dart';
 import '../models/moto.dart';
 import '../models/versement.dart';
 import '../models/depense.dart';
@@ -125,6 +125,7 @@ class DatabaseService {
     ''');
 
     await _creerTablesCategoriesActivite(db);
+    await _creerTablesDettes(db);
 
     // Catégories de dépenses par défaut (l'utilisateur peut en ajouter/supprimer)
     for (final cat in AppConstants.categoriesParDefaut) {
@@ -175,6 +176,11 @@ class DatabaseService {
       // a cote de Motos qui reste inchange. Purement additif.
       await db.execute('ALTER TABLE parametres ADD COLUMN categorie_active_id INTEGER');
       await _creerTablesCategoriesActivite(db);
+    }
+
+    if (oldVersion < 4) {
+      // v4 : suivi des dettes personnelles. Purement additif.
+      await _creerTablesDettes(db);
     }
   }
 
@@ -249,6 +255,36 @@ class DatabaseService {
         valeur TEXT,
         FOREIGN KEY (transaction_id) REFERENCES categorie_transactions (id),
         FOREIGN KEY (champ_id) REFERENCES categorie_champs (id)
+      )
+    ''');
+  }
+
+  /// Tables du suivi des dettes personnelles, separe du systeme de
+  /// categories generique. [lien_type]/[lien_id] referencent
+  /// optionnellement une moto ou une entite de categorie (aucune
+  /// contrainte FOREIGN KEY stricte ici : la cible depend de lien_type).
+  Future<void> _creerTablesDettes(Database db) async {
+    await db.execute('''
+      CREATE TABLE dettes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nom_personne TEXT NOT NULL,
+        montant_initial REAL NOT NULL,
+        date TEXT NOT NULL,
+        notes TEXT,
+        date_creation TEXT NOT NULL,
+        lien_type TEXT,
+        lien_id INTEGER
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE dette_remboursements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        dette_id INTEGER NOT NULL,
+        montant REAL NOT NULL,
+        date TEXT NOT NULL,
+        notes TEXT,
+        FOREIGN KEY (dette_id) REFERENCES dettes (id)
       )
     ''');
   }
@@ -878,41 +914,6 @@ class DatabaseService {
     });
   }
 
-  // -- Champs personnalises --
-
-  Future<int> insererChampCategorie(CategorieChamp c) async {
-    final db = await database;
-    return db.insert('categorie_champs', c.toMap()..remove('id'));
-  }
-
-  Future<void> supprimerChampCategorie(int id) async {
-    final db = await database;
-    await db.transaction((txn) async {
-      await txn.delete('categorie_entite_valeurs', where: 'champ_id = ?', whereArgs: [id]);
-      await txn.delete('categorie_transaction_valeurs', where: 'champ_id = ?', whereArgs: [id]);
-      await txn.delete('categorie_champs', where: 'id = ?', whereArgs: [id]);
-    });
-  }
-
-  /// [niveau] optionnel pour ne recuperer que les champs 'entite' ou
-  /// 'transaction' d'une categorie.
-  Future<List<CategorieChamp>> listerChampsCategorie(int categorieId, {String? niveau}) async {
-    final db = await database;
-    final conditions = <String>['categorie_id = ?'];
-    final args = <dynamic>[categorieId];
-    if (niveau != null) {
-      conditions.add('niveau = ?');
-      args.add(niveau);
-    }
-    final maps = await db.query(
-      'categorie_champs',
-      where: conditions.join(' AND '),
-      whereArgs: args,
-      orderBy: 'ordre ASC, id ASC',
-    );
-    return maps.map((m) => CategorieChamp.fromMap(m)).toList();
-  }
-
   // -- Entites --
 
   Future<int> insererEntiteCategorie(CategorieEntite e) async {
@@ -959,45 +960,16 @@ class DatabaseService {
     return CategorieEntite.fromMap(maps.first);
   }
 
-  /// Remplace toutes les valeurs de champs "entite" d'une entite par
-  /// [valeurs] (cle = id du champ). Les champs non presents dans la map
-  /// sont laisses tels quels si deja enregistres, ou absents sinon.
-  Future<void> definirValeursEntite(int entiteId, Map<int, String> valeurs) async {
-    final db = await database;
-    await db.transaction((txn) async {
-      for (final entree in valeurs.entries) {
-        final existant = await txn.query(
-          'categorie_entite_valeurs',
-          where: 'entite_id = ? AND champ_id = ?',
-          whereArgs: [entiteId, entree.key],
-        );
-        if (existant.isNotEmpty) {
-          await txn.update('categorie_entite_valeurs', {'valeur': entree.value},
-              where: 'entite_id = ? AND champ_id = ?', whereArgs: [entiteId, entree.key]);
-        } else {
-          await txn.insert('categorie_entite_valeurs',
-              {'entite_id': entiteId, 'champ_id': entree.key, 'valeur': entree.value});
-        }
-      }
-    });
-  }
-
-  /// Cle = id du champ, valeur = valeur saisie (toujours du texte brut,
-  /// interprete selon [CategorieChamp.type] par l'appelant).
-  Future<Map<int, String>> obtenirValeursEntite(int entiteId) async {
-    final db = await database;
-    final maps = await db.query('categorie_entite_valeurs', where: 'entite_id = ?', whereArgs: [entiteId]);
-    return {
-      for (final m in maps)
-        if (m['valeur'] != null) m['champ_id'] as int: m['valeur'] as String
-    };
-  }
-
   // -- Transactions (revenus/depenses generiques) --
 
   Future<int> insererTransactionCategorie(CategorieTransaction t) async {
     final db = await database;
     return db.insert('categorie_transactions', t.toMap()..remove('id'));
+  }
+
+  Future<int> modifierTransactionCategorie(CategorieTransaction t) async {
+    final db = await database;
+    return db.update('categorie_transactions', t.toMap(), where: 'id = ?', whereArgs: [t.id]);
   }
 
   Future<void> supprimerTransactionCategorie(int id) async {
@@ -1019,24 +991,32 @@ class DatabaseService {
     return maps.map((m) => CategorieTransaction.fromMap(m)).toList();
   }
 
-  Future<void> definirValeursTransaction(int transactionId, Map<int, String> valeurs) async {
+  /// Toutes les transactions d'une categorie, toutes entites confondues
+  /// (utilise pour l'export Excel).
+  Future<List<CategorieTransaction>> listerTransactionsCategorie(int categorieId) async {
     final db = await database;
-    await db.transaction((txn) async {
-      for (final entree in valeurs.entries) {
-        await txn.insert('categorie_transaction_valeurs',
-            {'transaction_id': transactionId, 'champ_id': entree.key, 'valeur': entree.value});
-      }
-    });
+    final maps = await db.rawQuery(
+      'SELECT ct.* FROM categorie_transactions ct '
+      'JOIN categorie_entites ce ON ce.id = ct.entite_id '
+      'WHERE ce.categorie_id = ? ORDER BY ct.date DESC',
+      [categorieId],
+    );
+    return maps.map((m) => CategorieTransaction.fromMap(m)).toList();
   }
 
-  Future<Map<int, String>> obtenirValeursTransaction(int transactionId) async {
+  /// Efface les entites et transactions d'une categorie (pas la categorie
+  /// elle-meme) — utilise pour un import Excel en mode "tout remplacer"
+  /// scope a cette seule categorie.
+  Future<void> viderDonneesCategorie(int categorieId) async {
     final db = await database;
-    final maps =
-        await db.query('categorie_transaction_valeurs', where: 'transaction_id = ?', whereArgs: [transactionId]);
-    return {
-      for (final m in maps)
-        if (m['valeur'] != null) m['champ_id'] as int: m['valeur'] as String
-    };
+    await db.transaction((txn) async {
+      final entites =
+          await txn.query('categorie_entites', columns: ['id'], where: 'categorie_id = ?', whereArgs: [categorieId]);
+      for (final e in entites) {
+        await txn.delete('categorie_transactions', where: 'entite_id = ?', whereArgs: [e['id']]);
+      }
+      await txn.delete('categorie_entites', where: 'categorie_id = ?', whereArgs: [categorieId]);
+    });
   }
 
   // -- Agregats --
@@ -1084,5 +1064,111 @@ class DatabaseService {
       }
     }
     return (revenus: revenus, depenses: depenses);
+  }
+
+  // ---------------------------------------------------------------------
+  // DETTES (suivi personnel, separe du systeme de categories generique)
+  // ---------------------------------------------------------------------
+
+  Future<int> insererDette(Dette d) async {
+    final db = await database;
+    return db.insert('dettes', d.toMap()..remove('id'));
+  }
+
+  Future<int> modifierDette(Dette d) async {
+    final db = await database;
+    return db.update('dettes', d.toMap(), where: 'id = ?', whereArgs: [d.id]);
+  }
+
+  Future<void> supprimerDette(int id) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.delete('dette_remboursements', where: 'dette_id = ?', whereArgs: [id]);
+      await txn.delete('dettes', where: 'id = ?', whereArgs: [id]);
+    });
+  }
+
+  /// Efface toutes les dettes et remboursements — utilise pour un import
+  /// Excel en mode "tout remplacer" scope aux dettes.
+  Future<void> viderDettes() async {
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.delete('dette_remboursements');
+      await txn.delete('dettes');
+    });
+  }
+
+  Future<List<Dette>> listerDettes() async {
+    final db = await database;
+    final maps = await db.query('dettes', orderBy: 'date DESC');
+    return maps.map((m) => Dette.fromMap(m)).toList();
+  }
+
+  /// Dettes rattachees a une moto ou a une entite de categorie precise.
+  Future<List<Dette>> listerDettesParLien(String lienType, int lienId) async {
+    final db = await database;
+    final maps = await db.query(
+      'dettes',
+      where: 'lien_type = ? AND lien_id = ?',
+      whereArgs: [lienType, lienId],
+      orderBy: 'date DESC',
+    );
+    return maps.map((m) => Dette.fromMap(m)).toList();
+  }
+
+  Future<Dette?> obtenirDette(int id) async {
+    final db = await database;
+    final maps = await db.query('dettes', where: 'id = ?', whereArgs: [id]);
+    if (maps.isEmpty) return null;
+    return Dette.fromMap(maps.first);
+  }
+
+  Future<int> insererRemboursement(DetteRemboursement r) async {
+    final db = await database;
+    return db.insert('dette_remboursements', r.toMap()..remove('id'));
+  }
+
+  Future<int> modifierRemboursement(DetteRemboursement r) async {
+    final db = await database;
+    return db.update('dette_remboursements', r.toMap(), where: 'id = ?', whereArgs: [r.id]);
+  }
+
+  Future<void> supprimerRemboursement(int id) async {
+    final db = await database;
+    await db.delete('dette_remboursements', where: 'id = ?', whereArgs: [id]);
+  }
+
+  Future<List<DetteRemboursement>> listerRemboursements(int detteId) async {
+    final db = await database;
+    final maps = await db.query('dette_remboursements', where: 'dette_id = ?', whereArgs: [detteId], orderBy: 'date DESC');
+    return maps.map((m) => DetteRemboursement.fromMap(m)).toList();
+  }
+
+  /// Montant restant du pour une dette : montant initial moins la somme
+  /// des remboursements recus. 0 (ou moins, si trop rembourse) = soldee.
+  Future<double> soldeDette(int detteId) async {
+    final db = await database;
+    final dette = await obtenirDette(detteId);
+    if (dette == null) return 0;
+    final result = await db.rawQuery(
+      'SELECT COALESCE(SUM(montant), 0) as total FROM dette_remboursements WHERE dette_id = ?',
+      [detteId],
+    );
+    final totalRembourse = (result.first['total'] as num).toDouble();
+    return dette.montantInitial - totalRembourse;
+  }
+
+  /// Somme des montants encore dus, toutes dettes non soldees confondues.
+  Future<double> totalDettesEnCours() async {
+    final db = await database;
+    final dettes = await db.query('dettes');
+    double total = 0;
+    for (final map in dettes) {
+      final dette = Dette.fromMap(map);
+      if (dette.id == null) continue;
+      final solde = await soldeDette(dette.id!);
+      if (solde > 0) total += solde;
+    }
+    return total;
   }
 }

@@ -11,8 +11,10 @@ import '../services/excel_service.dart';
 import '../services/notification_service.dart';
 import '../services/pdf_service.dart';
 import 'categorie/categories_screen.dart';
+import 'dette/dettes_screen.dart';
 import 'lock_screen.dart';
 import 'stats_screen.dart';
+import '../utils/formatters.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -31,6 +33,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _restaurationEnCours = false;
   bool _exportExcelEnCours = false;
   bool _importExcelEnCours = false;
+  double _totalDettes = 0;
 
   @override
   void initState() {
@@ -42,11 +45,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final p = await _db.obtenirParametres();
     final bioDispo = await AuthService.biometrieDisponible();
     final pinConfigure = await AuthService.pinConfigure();
+    final totalDettes = await _db.totalDettesEnCours();
     if (!mounted) return;
     setState(() {
       _parametres = p;
       _biometrieDisponible = bioDispo;
       _pinConfigure = pinConfigure;
+      _totalDettes = totalDettes;
     });
   }
 
@@ -570,6 +575,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
             icone: Icons.category_outlined,
             onTap: () async {
               await Navigator.push(context, MaterialPageRoute(builder: (_) => const CategoriesScreen()));
+              _charger();
+            },
+          ),
+          const SizedBox(height: 10),
+          _carteReglage(
+            titre: 'Dettes',
+            valeur: formaterMontant(_totalDettes, _parametres?.deviseSymbole ?? ''),
+            icone: Icons.request_page_outlined,
+            onTap: () async {
+              await Navigator.push(context, MaterialPageRoute(builder: (_) => const DettesScreen()));
               _charger();
             },
           ),

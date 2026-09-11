@@ -3,18 +3,20 @@ import 'package:flutter/material.dart';
 import '../../core/constants.dart';
 import '../../core/theme.dart';
 import '../../models/categorie_activite.dart';
-import '../../models/categorie_champ.dart';
 import '../../models/categorie_entite.dart';
 import '../../models/categorie_transaction.dart';
+import '../../models/dette.dart';
 import '../../services/database_service.dart';
 import '../../utils/couleur_utils.dart';
 import '../../utils/formatters.dart';
+import '../dette/add_edit_dette_screen.dart';
+import '../dette/dette_detail_screen.dart';
 import 'add_categorie_transaction_screen.dart';
 import 'add_edit_categorie_entite_screen.dart';
 
-/// Detail d'une entite generique (ex: une boutique precise) : ses champs
-/// personnalises, son solde, l'historique de ses revenus/depenses.
-/// Equivalent generique de MotoDetailScreen.
+/// Detail d'une entite generique (ex: une boutique precise) : son solde,
+/// l'historique de ses revenus/depenses, et les dettes qui lui sont
+/// rattachees. Equivalent generique de MotoDetailScreen.
 class CategorieEntiteDetailScreen extends StatefulWidget {
   final int entiteId;
   final CategorieActivite categorie;
@@ -29,8 +31,8 @@ class _CategorieEntiteDetailScreenState extends State<CategorieEntiteDetailScree
   final _db = DatabaseService.instance;
   CategorieEntite? _entite;
   List<CategorieTransaction> _transactions = [];
-  List<CategorieChamp> _champsEntite = [];
-  Map<int, String> _valeursEntite = {};
+  List<Dette> _dettes = [];
+  final Map<int, double> _soldeParDette = {};
   double _solde = 0;
   bool _chargement = true;
 
@@ -45,17 +47,19 @@ class _CategorieEntiteDetailScreenState extends State<CategorieEntiteDetailScree
     final entite = await _db.obtenirEntiteCategorie(widget.entiteId);
     if (entite == null) return;
     final transactions = await _db.listerTransactionsEntite(widget.entiteId);
-    final champs = await _db.listerChampsCategorie(widget.categorie.id!, niveau: AppConstants.niveauChampEntite);
-    final valeurs = await _db.obtenirValeursEntite(widget.entiteId);
     final solde = await _db.soldeEntiteCategorie(widget.entiteId);
+    final dettes = await _db.listerDettesParLien(AppConstants.detteLienCategorieEntite, widget.entiteId);
+    _soldeParDette.clear();
+    for (final d in dettes) {
+      if (d.id != null) _soldeParDette[d.id!] = await _db.soldeDette(d.id!);
+    }
 
     if (!mounted) return;
     setState(() {
       _entite = entite;
       _transactions = transactions;
-      _champsEntite = champs;
-      _valeursEntite = valeurs;
       _solde = solde;
+      _dettes = dettes;
       _chargement = false;
     });
   }
@@ -157,16 +161,6 @@ class _CategorieEntiteDetailScreenState extends State<CategorieEntiteDetailScree
                           color: _solde < 0 ? const Color(0xFFE2554A) : Colors.white,
                           fontSize: 22,
                           fontWeight: FontWeight.w600)),
-                  if (_champsEntite.isNotEmpty) ...[
-                    const SizedBox(height: 10),
-                    ..._champsEntite.where((c) => c.id != null && _valeursEntite[c.id!] != null).map(
-                          (c) => Padding(
-                            padding: const EdgeInsets.only(top: 2),
-                            child: Text('${c.nom} : ${_valeursEntite[c.id!]}',
-                                style: TextStyle(color: AppColors.texteGris, fontSize: 11)),
-                          ),
-                        ),
-                  ],
                   const SizedBox(height: 14),
                   SizedBox(
                     width: double.infinity,
@@ -190,6 +184,37 @@ class _CategorieEntiteDetailScreenState extends State<CategorieEntiteDetailScree
               ),
             ),
             const SizedBox(height: 20),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text('Dettes liees', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                TextButton.icon(
+                  onPressed: () async {
+                    await Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => AddEditDetteScreen(
+                          lienTypeInitial: AppConstants.detteLienCategorieEntite,
+                          lienIdInitial: widget.entiteId,
+                          lienNomInitial: entite.nom,
+                        ),
+                      ),
+                    );
+                    _charger();
+                  },
+                  icon: const Icon(Icons.add, size: 16),
+                  label: const Text('Ajouter'),
+                ),
+              ],
+            ),
+            if (_dettes.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: Text('Aucune dette liee.', style: TextStyle(color: AppColors.texteGris, fontSize: 12)),
+              )
+            else
+              ..._dettes.map((d) => _ligneDette(d, devise)),
+            const SizedBox(height: 20),
             const Text('Historique', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
             const SizedBox(height: 8),
             if (_transactions.isEmpty)
@@ -202,6 +227,46 @@ class _CategorieEntiteDetailScreenState extends State<CategorieEntiteDetailScree
               )
             else
               ..._transactions.map((t) => _ligneTransaction(t, devise)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _ligneDette(Dette d, String devise) {
+    final solde = _soldeParDette[d.id] ?? d.montantInitial;
+    return InkWell(
+      onTap: () async {
+        await Navigator.push(context, MaterialPageRoute(builder: (_) => DetteDetailScreen(detteId: d.id!)));
+        _charger();
+      },
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: AppColors.bordure, width: 0.6),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(d.nomPersonne, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                  Text(formaterDate(d.date), style: TextStyle(color: AppColors.texteGris, fontSize: 10)),
+                ],
+              ),
+            ),
+            Text(
+              formaterMontant(solde, devise),
+              style: TextStyle(
+                color: solde > 0 ? AppColors.danger : AppColors.succes,
+                fontWeight: FontWeight.w600,
+                fontSize: 12,
+              ),
+            ),
           ],
         ),
       ),

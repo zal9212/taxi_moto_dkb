@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../core/constants.dart';
 import '../core/theme.dart';
+import '../models/dette.dart';
 import '../models/moto.dart';
 import '../models/versement.dart';
 import '../services/database_service.dart';
@@ -10,6 +11,8 @@ import '../services/pdf_service.dart';
 import '../services/schedule_service.dart';
 import '../utils/formatters.dart';
 import 'add_edit_moto_screen.dart';
+import 'dette/add_edit_dette_screen.dart';
+import 'dette/dette_detail_screen.dart';
 
 class MotoDetailScreen extends StatefulWidget {
   final int motoId;
@@ -27,6 +30,8 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
   /// Solde net : negatif = retard (dette), positif = avance (credit).
   double _solde = 0;
   String _devise = AppConstants.devisePardDefaut;
+  List<Dette> _dettes = [];
+  final Map<int, double> _soldeParDette = {};
   bool _chargement = true;
 
   @override
@@ -50,6 +55,11 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     final totalVerse = await _db.totalEncaisse(motoId: widget.motoId);
     final solde = await _db.soldeNet(motoId: widget.motoId);
     final params = await _db.obtenirParametres();
+    final dettes = await _db.listerDettesParLien(AppConstants.detteLienMoto, widget.motoId);
+    _soldeParDette.clear();
+    for (final d in dettes) {
+      if (d.id != null) _soldeParDette[d.id!] = await _db.soldeDette(d.id!);
+    }
 
     if (!mounted) return;
     setState(() {
@@ -58,6 +68,7 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
       _totalVerse = totalVerse;
       _solde = solde;
       _devise = params.deviseSymbole;
+      _dettes = dettes;
       _chargement = false;
     });
   }
@@ -420,9 +431,80 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
               ),
             ),
             const SizedBox(height: 20),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text('Dettes liees', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                TextButton.icon(
+                  onPressed: () async {
+                    await Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => AddEditDetteScreen(
+                          lienTypeInitial: AppConstants.detteLienMoto,
+                          lienIdInitial: widget.motoId,
+                          lienNomInitial: moto.nom,
+                        ),
+                      ),
+                    );
+                    _charger();
+                  },
+                  icon: const Icon(Icons.add, size: 16),
+                  label: const Text('Ajouter'),
+                ),
+              ],
+            ),
+            if (_dettes.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: Text('Aucune dette liee.', style: TextStyle(color: AppColors.texteGris, fontSize: 12)),
+              )
+            else
+              ..._dettes.map((d) => _ligneDette(d)),
+            const SizedBox(height: 20),
             const Text('Historique des versements', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
             const SizedBox(height: 8),
             ..._versements.map((v) => _ligneVersement(v)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _ligneDette(Dette d) {
+    final solde = _soldeParDette[d.id] ?? d.montantInitial;
+    return InkWell(
+      onTap: () async {
+        await Navigator.push(context, MaterialPageRoute(builder: (_) => DetteDetailScreen(detteId: d.id!)));
+        _charger();
+      },
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: AppColors.bordure, width: 0.6),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(d.nomPersonne, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                  Text(formaterDate(d.date), style: TextStyle(color: AppColors.texteGris, fontSize: 10)),
+                ],
+              ),
+            ),
+            Text(
+              formaterMontant(solde, _devise),
+              style: TextStyle(
+                color: solde > 0 ? AppColors.danger : AppColors.succes,
+                fontWeight: FontWeight.w600,
+                fontSize: 12,
+              ),
+            ),
           ],
         ),
       ),
