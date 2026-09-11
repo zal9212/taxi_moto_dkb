@@ -2,6 +2,10 @@ import 'package:path/path.dart';
 import 'package:sqflite/sqflite.dart';
 
 import '../core/constants.dart';
+import '../models/categorie_activite.dart';
+import '../models/categorie_champ.dart';
+import '../models/categorie_entite.dart';
+import '../models/categorie_transaction.dart';
 import '../models/moto.dart';
 import '../models/versement.dart';
 import '../models/depense.dart';
@@ -115,9 +119,12 @@ class DatabaseService {
         pin_code_hash TEXT,
         biometrie_active INTEGER NOT NULL DEFAULT 0,
         devise_symbole TEXT NOT NULL DEFAULT 'FG',
-        delai_notification_heures INTEGER NOT NULL DEFAULT 24
+        delai_notification_heures INTEGER NOT NULL DEFAULT 24,
+        categorie_active_id INTEGER
       )
     ''');
+
+    await _creerTablesCategoriesActivite(db);
 
     // Catégories de dépenses par défaut (l'utilisateur peut en ajouter/supprimer)
     for (final cat in AppConstants.categoriesParDefaut) {
@@ -162,6 +169,88 @@ class DatabaseService {
       await db.execute('DROP TABLE motos');
       await db.execute('ALTER TABLE motos_new RENAME TO motos');
     }
+
+    if (oldVersion < 3) {
+      // v3 : systeme generique de "categories d'activite" (ex: Boutiques),
+      // a cote de Motos qui reste inchange. Purement additif.
+      await db.execute('ALTER TABLE parametres ADD COLUMN categorie_active_id INTEGER');
+      await _creerTablesCategoriesActivite(db);
+    }
+  }
+
+  /// Tables du systeme generique de categories d'activite (ex: Boutiques),
+  /// separe de Motos. Regroupe ici car cree a la fois dans [_onCreate]
+  /// (nouvelle installation) et dans [_onUpgrade] (v3, installation
+  /// existante) — les deux doivent aboutir au meme schema.
+  Future<void> _creerTablesCategoriesActivite(Database db) async {
+    await db.execute('''
+      CREATE TABLE categories_activite (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nom TEXT NOT NULL,
+        couleur TEXT NOT NULL,
+        devise_symbole TEXT NOT NULL,
+        date_creation TEXT NOT NULL
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE categorie_champs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        categorie_id INTEGER NOT NULL,
+        niveau TEXT NOT NULL,
+        nom TEXT NOT NULL,
+        type TEXT NOT NULL,
+        options TEXT,
+        ordre INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY (categorie_id) REFERENCES categories_activite (id)
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE categorie_entites (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        categorie_id INTEGER NOT NULL,
+        nom TEXT NOT NULL,
+        statut TEXT NOT NULL,
+        date_creation TEXT NOT NULL,
+        notes TEXT,
+        FOREIGN KEY (categorie_id) REFERENCES categories_activite (id)
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE categorie_entite_valeurs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        entite_id INTEGER NOT NULL,
+        champ_id INTEGER NOT NULL,
+        valeur TEXT,
+        FOREIGN KEY (entite_id) REFERENCES categorie_entites (id),
+        FOREIGN KEY (champ_id) REFERENCES categorie_champs (id)
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE categorie_transactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        entite_id INTEGER NOT NULL,
+        type TEXT NOT NULL,
+        montant REAL NOT NULL,
+        date TEXT NOT NULL,
+        description TEXT,
+        FOREIGN KEY (entite_id) REFERENCES categorie_entites (id)
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE categorie_transaction_valeurs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        transaction_id INTEGER NOT NULL,
+        champ_id INTEGER NOT NULL,
+        valeur TEXT,
+        FOREIGN KEY (transaction_id) REFERENCES categorie_transactions (id),
+        FOREIGN KEY (champ_id) REFERENCES categorie_champs (id)
+      )
+    ''');
   }
 
   // ---------------------------------------------------------------------
@@ -300,14 +389,22 @@ class DatabaseService {
 
   /// Recalcule les statuts "en_attente" -> "en_retard" pour les échéances
   /// dépassées. À appeler au démarrage de l'app et sur pull-to-refresh.
+  /// Ne fait basculer en "en_retard" que les echeances des motos encore
+  /// actives : une moto suspendue/archivee (hors service) ne doit plus
+  /// accumuler de retard au fil du temps qui passe.
   Future<void> actualiserRetards() async {
     final db = await database;
     final aujourdHui = DateTime.now().toIso8601String();
-    await db.update(
-      'versements',
-      {'statut': AppConstants.versementEnRetard},
-      where: 'statut = ? AND date_echeance < ?',
-      whereArgs: [AppConstants.versementEnAttente, aujourdHui],
+    await db.rawUpdate(
+      'UPDATE versements SET statut = ? '
+      'WHERE statut = ? AND date_echeance < ? '
+      'AND moto_id IN (SELECT id FROM motos WHERE statut = ?)',
+      [
+        AppConstants.versementEnRetard,
+        AppConstants.versementEnAttente,
+        aujourdHui,
+        AppConstants.motoActive,
+      ],
     );
   }
 
@@ -403,6 +500,13 @@ class DatabaseService {
   /// compte des versements partiels sur des echeances marquees payees
   /// (le manque n'est alors plus "perdu") et des versements superieurs au
   /// montant prevu (le credit se reporte sur les echeances suivantes).
+  ///
+  /// Le montant du (totalDu) ne compte que les echeances des motos encore
+  /// actives : une moto suspendue/archivee ne doit plus voir son retard
+  /// grossir avec le temps qui passe pendant qu'elle est hors service.
+  /// Le montant recu (totalRecu), lui, reste toujours comptabilise quel
+  /// que soit le statut actuel de la moto — l'argent deja encaisse ne
+  /// disparait pas quand on met une moto en pause.
   Future<double> soldeNet({int? motoId}) async {
     final db = await database;
     final aujourdHui = DateTime.now().toIso8601String();
@@ -418,8 +522,11 @@ class DatabaseService {
       recuArgs,
     );
 
-    final duConditions = <String>['date_echeance <= ?'];
-    final duArgs = <dynamic>[aujourdHui];
+    final duConditions = <String>[
+      'date_echeance <= ?',
+      'moto_id IN (SELECT id FROM motos WHERE statut = ?)',
+    ];
+    final duArgs = <dynamic>[aujourdHui, AppConstants.motoActive];
     if (motoId != null) {
       duConditions.add('moto_id = ?');
       duArgs.add(motoId);
@@ -557,6 +664,55 @@ class DatabaseService {
     await insererVersements(nouvelles);
   }
 
+  /// A appeler quand une moto est reactivee apres une pause (suspension).
+  /// Les echeances encore non payees qui dataient d'avant la pause ne
+  /// doivent pas etre comptees comme du retard : la moto n'a pas
+  /// travaille pendant ce temps, c'est justement pour ca qu'elle avait
+  /// ete mise en pause. On les retire (l'historique deja paye n'est
+  /// jamais touche) et on redemarre une fenetre fraiche a partir
+  /// d'aujourd'hui, pas de la date ou elle s'etait arretee.
+  Future<void> redemarrerEcheancesApresReactivation(Moto moto) async {
+    if (moto.id == null) return;
+    final db = await database;
+    await db.delete(
+      'versements',
+      where: 'moto_id = ? AND statut != ?',
+      whereArgs: [moto.id, AppConstants.versementPaye],
+    );
+
+    final aujourdHui = DateTime.now();
+    var prochaine = ScheduleService.premiereEcheance(
+      dateDebut: aujourdHui,
+      type: moto.frequenceType,
+      valeur: moto.frequenceValeur,
+    );
+    // Filet de securite : pour la frequence mensuelle, premiereEcheance()
+    // peut retomber plus tot dans le mois courant que la date du jour.
+    while (prochaine.isBefore(aujourdHui)) {
+      prochaine = ScheduleService.echeanceSuivante(
+        dateActuelle: prochaine,
+        type: moto.frequenceType,
+        valeur: moto.frequenceValeur,
+      );
+    }
+
+    final nouvelles = <Versement>[];
+    for (var i = 0; i < _tailleFenetreEcheances; i++) {
+      nouvelles.add(Versement(
+        motoId: moto.id!,
+        dateEcheance: prochaine,
+        montantPrevu: moto.montantVersement,
+        statut: AppConstants.versementEnAttente,
+      ));
+      prochaine = ScheduleService.echeanceSuivante(
+        dateActuelle: prochaine,
+        type: moto.frequenceType,
+        valeur: moto.frequenceValeur,
+      );
+    }
+    await insererVersements(nouvelles);
+  }
+
   // ---------------------------------------------------------------------
   // CATEGORIES DE DEPENSES
   // ---------------------------------------------------------------------
@@ -661,5 +817,272 @@ class DatabaseService {
   Future<void> enregistrerParametres(Parametre p) async {
     final db = await database;
     await db.update('parametres', p.toMap(), where: 'id = ?', whereArgs: [1]);
+  }
+
+  /// Change la categorie active (null = revient a Motos). Ecriture directe
+  /// car [Parametre.copyWith] ne peut pas remettre ce champ a null.
+  Future<void> definirCategorieActive(int? categorieId) async {
+    final db = await database;
+    await db.update('parametres', {'categorie_active_id': categorieId}, where: 'id = ?', whereArgs: [1]);
+  }
+
+  // ---------------------------------------------------------------------
+  // CATEGORIES D'ACTIVITE GENERIQUES (ex: Boutiques) — separe de Motos.
+  // ---------------------------------------------------------------------
+
+  Future<int> insererCategorieActivite(CategorieActivite c) async {
+    final db = await database;
+    return db.insert('categories_activite', c.toMap()..remove('id'));
+  }
+
+  Future<int> modifierCategorieActivite(CategorieActivite c) async {
+    final db = await database;
+    return db.update('categories_activite', c.toMap(), where: 'id = ?', whereArgs: [c.id]);
+  }
+
+  Future<List<CategorieActivite>> listerCategoriesActivite() async {
+    final db = await database;
+    final maps = await db.query('categories_activite', orderBy: 'nom ASC');
+    return maps.map((m) => CategorieActivite.fromMap(m)).toList();
+  }
+
+  Future<CategorieActivite?> obtenirCategorieActivite(int id) async {
+    final db = await database;
+    final maps = await db.query('categories_activite', where: 'id = ?', whereArgs: [id]);
+    if (maps.isEmpty) return null;
+    return CategorieActivite.fromMap(maps.first);
+  }
+
+  /// Supprime definitivement une categorie et tout ce qu'elle contient
+  /// (champs, entites, transactions, valeurs). Irreversible. Si c'etait la
+  /// categorie active, revient automatiquement sur Motos.
+  Future<void> supprimerCategorieActivite(int id) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      final entites = await txn.query('categorie_entites', columns: ['id'], where: 'categorie_id = ?', whereArgs: [id]);
+      for (final e in entites) {
+        final entiteId = e['id'] as int;
+        final transactions = await txn.query('categorie_transactions',
+            columns: ['id'], where: 'entite_id = ?', whereArgs: [entiteId]);
+        for (final t in transactions) {
+          await txn.delete('categorie_transaction_valeurs', where: 'transaction_id = ?', whereArgs: [t['id']]);
+        }
+        await txn.delete('categorie_transactions', where: 'entite_id = ?', whereArgs: [entiteId]);
+        await txn.delete('categorie_entite_valeurs', where: 'entite_id = ?', whereArgs: [entiteId]);
+      }
+      await txn.delete('categorie_entites', where: 'categorie_id = ?', whereArgs: [id]);
+      await txn.delete('categorie_champs', where: 'categorie_id = ?', whereArgs: [id]);
+      await txn.delete('categories_activite', where: 'id = ?', whereArgs: [id]);
+      await txn.update('parametres', {'categorie_active_id': null},
+          where: 'id = ? AND categorie_active_id = ?', whereArgs: [1, id]);
+    });
+  }
+
+  // -- Champs personnalises --
+
+  Future<int> insererChampCategorie(CategorieChamp c) async {
+    final db = await database;
+    return db.insert('categorie_champs', c.toMap()..remove('id'));
+  }
+
+  Future<void> supprimerChampCategorie(int id) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.delete('categorie_entite_valeurs', where: 'champ_id = ?', whereArgs: [id]);
+      await txn.delete('categorie_transaction_valeurs', where: 'champ_id = ?', whereArgs: [id]);
+      await txn.delete('categorie_champs', where: 'id = ?', whereArgs: [id]);
+    });
+  }
+
+  /// [niveau] optionnel pour ne recuperer que les champs 'entite' ou
+  /// 'transaction' d'une categorie.
+  Future<List<CategorieChamp>> listerChampsCategorie(int categorieId, {String? niveau}) async {
+    final db = await database;
+    final conditions = <String>['categorie_id = ?'];
+    final args = <dynamic>[categorieId];
+    if (niveau != null) {
+      conditions.add('niveau = ?');
+      args.add(niveau);
+    }
+    final maps = await db.query(
+      'categorie_champs',
+      where: conditions.join(' AND '),
+      whereArgs: args,
+      orderBy: 'ordre ASC, id ASC',
+    );
+    return maps.map((m) => CategorieChamp.fromMap(m)).toList();
+  }
+
+  // -- Entites --
+
+  Future<int> insererEntiteCategorie(CategorieEntite e) async {
+    final db = await database;
+    return db.insert('categorie_entites', e.toMap()..remove('id'));
+  }
+
+  Future<int> modifierEntiteCategorie(CategorieEntite e) async {
+    final db = await database;
+    return db.update('categorie_entites', e.toMap(), where: 'id = ?', whereArgs: [e.id]);
+  }
+
+  /// Supprime une entite et tout son historique (transactions, valeurs de
+  /// champs). Irreversible.
+  Future<void> supprimerEntiteCategorie(int id) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      final transactions =
+          await txn.query('categorie_transactions', columns: ['id'], where: 'entite_id = ?', whereArgs: [id]);
+      for (final t in transactions) {
+        await txn.delete('categorie_transaction_valeurs', where: 'transaction_id = ?', whereArgs: [t['id']]);
+      }
+      await txn.delete('categorie_transactions', where: 'entite_id = ?', whereArgs: [id]);
+      await txn.delete('categorie_entite_valeurs', where: 'entite_id = ?', whereArgs: [id]);
+      await txn.delete('categorie_entites', where: 'id = ?', whereArgs: [id]);
+    });
+  }
+
+  Future<List<CategorieEntite>> listerEntitesCategorie(int categorieId) async {
+    final db = await database;
+    final maps = await db.query(
+      'categorie_entites',
+      where: 'categorie_id = ?',
+      whereArgs: [categorieId],
+      orderBy: 'date_creation DESC',
+    );
+    return maps.map((m) => CategorieEntite.fromMap(m)).toList();
+  }
+
+  Future<CategorieEntite?> obtenirEntiteCategorie(int id) async {
+    final db = await database;
+    final maps = await db.query('categorie_entites', where: 'id = ?', whereArgs: [id]);
+    if (maps.isEmpty) return null;
+    return CategorieEntite.fromMap(maps.first);
+  }
+
+  /// Remplace toutes les valeurs de champs "entite" d'une entite par
+  /// [valeurs] (cle = id du champ). Les champs non presents dans la map
+  /// sont laisses tels quels si deja enregistres, ou absents sinon.
+  Future<void> definirValeursEntite(int entiteId, Map<int, String> valeurs) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      for (final entree in valeurs.entries) {
+        final existant = await txn.query(
+          'categorie_entite_valeurs',
+          where: 'entite_id = ? AND champ_id = ?',
+          whereArgs: [entiteId, entree.key],
+        );
+        if (existant.isNotEmpty) {
+          await txn.update('categorie_entite_valeurs', {'valeur': entree.value},
+              where: 'entite_id = ? AND champ_id = ?', whereArgs: [entiteId, entree.key]);
+        } else {
+          await txn.insert('categorie_entite_valeurs',
+              {'entite_id': entiteId, 'champ_id': entree.key, 'valeur': entree.value});
+        }
+      }
+    });
+  }
+
+  /// Cle = id du champ, valeur = valeur saisie (toujours du texte brut,
+  /// interprete selon [CategorieChamp.type] par l'appelant).
+  Future<Map<int, String>> obtenirValeursEntite(int entiteId) async {
+    final db = await database;
+    final maps = await db.query('categorie_entite_valeurs', where: 'entite_id = ?', whereArgs: [entiteId]);
+    return {
+      for (final m in maps)
+        if (m['valeur'] != null) m['champ_id'] as int: m['valeur'] as String
+    };
+  }
+
+  // -- Transactions (revenus/depenses generiques) --
+
+  Future<int> insererTransactionCategorie(CategorieTransaction t) async {
+    final db = await database;
+    return db.insert('categorie_transactions', t.toMap()..remove('id'));
+  }
+
+  Future<void> supprimerTransactionCategorie(int id) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.delete('categorie_transaction_valeurs', where: 'transaction_id = ?', whereArgs: [id]);
+      await txn.delete('categorie_transactions', where: 'id = ?', whereArgs: [id]);
+    });
+  }
+
+  Future<List<CategorieTransaction>> listerTransactionsEntite(int entiteId) async {
+    final db = await database;
+    final maps = await db.query(
+      'categorie_transactions',
+      where: 'entite_id = ?',
+      whereArgs: [entiteId],
+      orderBy: 'date DESC',
+    );
+    return maps.map((m) => CategorieTransaction.fromMap(m)).toList();
+  }
+
+  Future<void> definirValeursTransaction(int transactionId, Map<int, String> valeurs) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      for (final entree in valeurs.entries) {
+        await txn.insert('categorie_transaction_valeurs',
+            {'transaction_id': transactionId, 'champ_id': entree.key, 'valeur': entree.value});
+      }
+    });
+  }
+
+  Future<Map<int, String>> obtenirValeursTransaction(int transactionId) async {
+    final db = await database;
+    final maps =
+        await db.query('categorie_transaction_valeurs', where: 'transaction_id = ?', whereArgs: [transactionId]);
+    return {
+      for (final m in maps)
+        if (m['valeur'] != null) m['champ_id'] as int: m['valeur'] as String
+    };
+  }
+
+  // -- Agregats --
+
+  /// Solde d'une entite : total des revenus moins total des depenses.
+  Future<double> soldeEntiteCategorie(int entiteId) async {
+    final db = await database;
+    final result = await db.rawQuery(
+      "SELECT type, COALESCE(SUM(montant), 0) as total FROM categorie_transactions "
+      "WHERE entite_id = ? GROUP BY type",
+      [entiteId],
+    );
+    double revenus = 0;
+    double depenses = 0;
+    for (final r in result) {
+      final total = (r['total'] as num).toDouble();
+      if (r['type'] == AppConstants.transactionRevenu) {
+        revenus = total;
+      } else if (r['type'] == AppConstants.transactionDepense) {
+        depenses = total;
+      }
+    }
+    return revenus - depenses;
+  }
+
+  /// Totaux (revenus, depenses) sur l'ensemble d'une categorie, toutes
+  /// entites confondues — pour le tableau de bord de la categorie.
+  Future<({double revenus, double depenses})> totauxCategorie(int categorieId) async {
+    final db = await database;
+    final result = await db.rawQuery(
+      "SELECT ct.type as type, COALESCE(SUM(ct.montant), 0) as total "
+      "FROM categorie_transactions ct "
+      "JOIN categorie_entites ce ON ce.id = ct.entite_id "
+      "WHERE ce.categorie_id = ? GROUP BY ct.type",
+      [categorieId],
+    );
+    double revenus = 0;
+    double depenses = 0;
+    for (final r in result) {
+      final total = (r['total'] as num).toDouble();
+      if (r['type'] == AppConstants.transactionRevenu) {
+        revenus = total;
+      } else if (r['type'] == AppConstants.transactionDepense) {
+        depenses = total;
+      }
+    }
+    return (revenus: revenus, depenses: depenses);
   }
 }

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../core/theme.dart';
 import '../services/auth_service.dart';
 import '../services/database_service.dart';
+import 'categorie/categorie_home_screen.dart';
 import 'home_screen.dart';
 import 'setup_pin_screen.dart';
 
@@ -31,6 +32,7 @@ class _LockScreenState extends State<LockScreen> {
   bool _verificationEnCours = true;
   bool _pinExiste = false;
   bool _biometrieActive = false;
+  int? _categorieActiveId;
 
   int _secondesVerrou = 0;
   Timer? _minuteur;
@@ -50,6 +52,7 @@ class _LockScreenState extends State<LockScreen> {
   Future<void> _initialiser() async {
     final pinConfigure = await AuthService.pinConfigure();
     final params = await DatabaseService.instance.obtenirParametres();
+    _categorieActiveId = params.categorieActiveId;
 
     if (!pinConfigure) {
       _allerVersAccueil();
@@ -96,8 +99,12 @@ class _LockScreenState extends State<LockScreen> {
       Navigator.of(context).pop();
       return;
     }
+    final categorieId = _categorieActiveId;
     Navigator.of(context).pushReplacement(
-      MaterialPageRoute(builder: (_) => const HomeScreen()),
+      MaterialPageRoute(
+        builder: (_) =>
+            categorieId != null ? CategorieHomeScreen(categorieId: categorieId) : const HomeScreen(),
+      ),
     );
   }
 

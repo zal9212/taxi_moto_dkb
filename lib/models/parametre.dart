@@ -9,6 +9,10 @@ class Parametre {
   final bool biometrieActive;
   final String deviseSymbole;
   final int delaiNotificationHeures;
+  /// Categorie d'activite actuellement active (null = Motos, le systeme
+  /// specialise par defaut ; sinon l'id d'une CategorieActivite creee par
+  /// l'utilisateur). Change tout le contexte de l'app (ecrans, couleur).
+  final int? categorieActiveId;
 
   Parametre({
     this.id = 1,
@@ -16,6 +20,7 @@ class Parametre {
     this.biometrieActive = AppConstants.biometrieActiveParDefaut,
     this.deviseSymbole = AppConstants.devisePardDefaut,
     this.delaiNotificationHeures = AppConstants.delaiNotificationHeuresParDefaut,
+    this.categorieActiveId,
   });
 
   Parametre copyWith({
@@ -30,6 +35,7 @@ class Parametre {
       biometrieActive: biometrieActive ?? this.biometrieActive,
       deviseSymbole: deviseSymbole ?? this.deviseSymbole,
       delaiNotificationHeures: delaiNotificationHeures ?? this.delaiNotificationHeures,
+      categorieActiveId: categorieActiveId,
     );
   }
 
@@ -40,6 +46,7 @@ class Parametre {
       'biometrie_active': biometrieActive ? 1 : 0,
       'devise_symbole': deviseSymbole,
       'delai_notification_heures': delaiNotificationHeures,
+      'categorie_active_id': categorieActiveId,
     };
   }
 
@@ -50,6 +57,7 @@ class Parametre {
       biometrieActive: (map['biometrie_active'] as int) == 1,
       deviseSymbole: map['devise_symbole'] as String,
       delaiNotificationHeures: map['delai_notification_heures'] as int,
+      categorieActiveId: map['categorie_active_id'] as int?,
     );
   }
 }

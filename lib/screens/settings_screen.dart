@@ -10,6 +10,7 @@ import '../services/auth_service.dart';
 import '../services/excel_service.dart';
 import '../services/notification_service.dart';
 import '../services/pdf_service.dart';
+import 'categorie/categories_screen.dart';
 import 'lock_screen.dart';
 import 'stats_screen.dart';
 
@@ -560,6 +561,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               ],
             ),
+          ),
+          const SizedBox(height: 20),
+          _sectionTitre('Autres activites'),
+          _carteReglage(
+            titre: 'Categories d\'activite',
+            valeur: 'Motos',
+            icone: Icons.category_outlined,
+            onTap: () async {
+              await Navigator.push(context, MaterialPageRoute(builder: (_) => const CategoriesScreen()));
+              _charger();
+            },
           ),
           const SizedBox(height: 20),
           _sectionTitre('A propos'),

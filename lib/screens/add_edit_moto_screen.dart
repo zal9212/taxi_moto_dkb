@@ -168,15 +168,13 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
 
   Future<void> _planifierNotifications(Moto moto) async {
     if (moto.id == null) return;
-    final params = await _db.obtenirParametres();
     final versements = await _db.listerVersementsParMoto(moto.id!);
-    for (final v in versements.where((v) => v.statut != AppConstants.versementPaye)) {
-      await NotificationService.planifierRappel(
-        versement: v,
-        moto: moto,
-        delaiHeures: params.delaiNotificationHeures,
-      );
-    }
+    final params = await _db.obtenirParametres();
+    await NotificationService.synchroniserRappelsMoto(
+      moto: moto,
+      versements: versements,
+      delaiHeures: params.delaiNotificationHeures,
+    );
   }
 
   @override

@@ -7,7 +7,7 @@ class AppConstants {
   AppConstants._();
 
   static const String dbName = 'moto_taxi_douka.db';
-  static const int dbVersion = 2;
+  static const int dbVersion = 3;
 
   // Valeurs par défaut au premier lancement (modifiables ensuite)
   static const String devisePardDefaut = 'FG';
@@ -40,5 +40,43 @@ class AppConstants {
 
   static const List<String> joursSemaine = [
     'Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche'
+  ];
+
+  // ---------------------------------------------------------------------
+  // Categories d'activite generiques (Boutiques, etc. - a cote de Motos,
+  // qui reste un systeme specialise inchange). Statuts d'entite generique :
+  // memes valeurs que motoActive/motoSuspendue/motoArchivee, reutilisees
+  // telles quelles.
+  // ---------------------------------------------------------------------
+
+  // Niveau d'un champ personnalise
+  static const String niveauChampEntite = 'entite';
+  static const String niveauChampTransaction = 'transaction';
+
+  // Type d'un champ personnalise
+  static const String typeChampTexte = 'texte';
+  static const String typeChampMontant = 'montant';
+  static const String typeChampDate = 'date';
+  static const String typeChampListe = 'liste';
+
+  static const List<String> typesChampDisponibles = [
+    typeChampTexte,
+    typeChampMontant,
+    typeChampDate,
+    typeChampListe,
+  ];
+
+  // Type d'une transaction generique (revenu/depense d'une entite)
+  static const String transactionRevenu = 'revenu';
+  static const String transactionDepense = 'depense';
+
+  // Palette de couleurs proposee a la creation d'une categorie
+  static const List<String> couleursCategorieDisponibles = [
+    '#2D6CDF', // bleu
+    '#0EA5A5', // sarcelle
+    '#8B5CF6', // violet
+    '#E2554A', // corail
+    '#B5860A', // ambre
+    '#C8F169', // vert lime
   ];
 }

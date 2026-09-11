@@ -2,6 +2,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/timezone.dart' as tz;
 import 'package:timezone/data/latest.dart' as tzdata;
 
+import '../core/constants.dart';
 import '../models/moto.dart';
 import '../models/versement.dart';
 import 'database_service.dart';
@@ -86,17 +87,42 @@ class NotificationService {
     await _plugin.cancel(versementId);
   }
 
+  /// Synchronise les rappels d'une moto avec son statut actuel : programme
+  /// les rappels de ses echeances non payees si elle est active, les
+  /// annule sinon (suspendue/archivee = hors service, ne doit plus
+  /// notifier tant qu'elle n'est pas reactivee).
+  static Future<void> synchroniserRappelsMoto({
+    required Moto moto,
+    required List<Versement> versements,
+    required int delaiHeures,
+  }) async {
+    final nonPayes = versements.where((v) => v.statut != AppConstants.versementPaye);
+
+    if (moto.statut != AppConstants.motoActive) {
+      for (final v in nonPayes) {
+        if (v.id != null) await annulerRappel(v.id!);
+      }
+      return;
+    }
+
+    for (final v in nonPayes) {
+      await planifierRappel(versement: v, moto: moto, delaiHeures: delaiHeures);
+    }
+  }
+
   /// Reprogramme tous les rappels en attente — utile après un changement
-  /// de délai de notification dans les Réglages.
+  /// de délai de notification dans les Réglages. Les motos suspendues ou
+  /// archivées (hors service) sont ignorées : elles ne doivent plus
+  /// notifier tant qu'elles ne sont pas réactivées.
   static Future<void> reprogrammerTousLesRappels() async {
     await _plugin.cancelAll();
     final params = await DatabaseService.instance.obtenirParametres();
-    final motos = await DatabaseService.instance.listerMotos();
+    final motos = await DatabaseService.instance.listerMotos(statut: AppConstants.motoActive);
     for (final moto in motos) {
       if (moto.id == null) continue;
       final versements = await DatabaseService.instance.listerVersementsParMoto(moto.id!);
       for (final v in versements) {
-        if (v.statut != 'paye') {
+        if (v.statut != AppConstants.versementPaye) {
           await planifierRappel(
             versement: v,
             moto: moto,

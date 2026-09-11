@@ -119,6 +119,67 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     );
   }
 
+  /// Suspend (hors service) ou reactive la moto. Une moto suspendue arrete
+  /// de generer de nouvelles echeances, de notifier, et son solde/retard
+  /// n'accumule plus rien pendant qu'elle est en pause — sans rien
+  /// supprimer, elle peut etre reactivee a tout moment.
+  Future<void> _basculerSuspension() async {
+    if (_moto?.id == null) return;
+    final estActive = _moto!.statut == AppConstants.motoActive;
+
+    if (estActive) {
+      final confirme = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Suspendre cette moto ?'),
+          content: const Text(
+              'Aucune nouvelle echeance ne sera generee et les rappels de '
+              'notification seront arretes tant qu\'elle est suspendue. '
+              'L\'historique deja paye est conserve. A la reactivation, les '
+              'echeances encore en attente ne compteront pas comme du retard '
+              '(la moto n\'aura pas travaille pendant la pause) : le suivi '
+              'repartira simplement a partir de la date de reactivation.'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Annuler')),
+            ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('Suspendre')),
+          ],
+        ),
+      );
+      if (confirme != true) return;
+    }
+
+    final motoMisAJour = _moto!.copyWith(
+      statut: estActive ? AppConstants.motoSuspendue : AppConstants.motoActive,
+    );
+    await _db.modifierMoto(motoMisAJour);
+
+    // Dans les deux sens, les rappels des echeances encore en attente
+    // (celles d'avant le changement de statut) n'ont plus lieu d'etre.
+    for (final v in _versements) {
+      if (v.statut != AppConstants.versementPaye && v.id != null) {
+        await NotificationService.annulerRappel(v.id!);
+      }
+    }
+
+    if (!estActive) {
+      // Reactivation apres une pause : la moto n'a pas travaille pendant
+      // ce temps, ses echeances non payees d'avant la pause ne doivent
+      // donc pas compter comme du retard - on repart d'une fenetre
+      // fraiche a partir d'aujourd'hui plutot que de la date ou elle
+      // s'etait arretee.
+      await _db.redemarrerEcheancesApresReactivation(motoMisAJour);
+      final nouveauxVersements = await _db.listerVersementsParMoto(motoMisAJour.id!);
+      final params = await _db.obtenirParametres();
+      await NotificationService.synchroniserRappelsMoto(
+        moto: motoMisAJour,
+        versements: nouveauxVersements,
+        delaiHeures: params.delaiNotificationHeures,
+      );
+    }
+
+    _charger();
+  }
+
   Future<void> _supprimerMoto() async {
     if (_moto?.id == null) return;
     final confirme = await showDialog<bool>(
@@ -271,9 +332,16 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
           ),
           PopupMenuButton<String>(
             onSelected: (v) {
+              if (v == 'suspendre') _basculerSuspension();
               if (v == 'supprimer') _supprimerMoto();
             },
             itemBuilder: (context) => [
+              PopupMenuItem(
+                value: 'suspendre',
+                child: Text(moto.statut == AppConstants.motoActive
+                    ? 'Suspendre (hors service)'
+                    : 'Reactiver cette moto'),
+              ),
               PopupMenuItem(
                 value: 'supprimer',
                 child: Text('Supprimer la moto', style: TextStyle(color: AppColors.danger)),
@@ -302,7 +370,7 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
                     ScheduleService.libelleFrequence(moto.frequenceType, moto.frequenceValeur),
                     style: TextStyle(color: AppColors.texteGris, fontSize: 11),
                   ),
-                  if (_solde != 0) ...[
+                  if (moto.statut == AppConstants.motoActive && _solde != 0) ...[
                     const SizedBox(height: 10),
                     Row(
                       children: [
