@@ -1,8 +1,24 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("kotlin-android")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+}
+
+// Signature stable entre tous les builds release, generee une seule fois par
+// android/app/upload-keystore.jks (voir android/key.properties.example) : sans
+// elle, chaque build release re-signe avec la cle debug generee au hasard sur
+// chaque machine/CI, et Android refuse d'installer une mise a jour signee
+// differemment (obligeant a desinstaller, donc a perdre les donnees locales).
+// Absent => on retombe sur la signature debug, pour ne jamais casser le build.
+val keystorePropertiesFile = rootProject.file("key.properties")
+val keystoreProperties = Properties()
+val keystoreDisponible = keystorePropertiesFile.exists()
+if (keystoreDisponible) {
+    keystoreProperties.load(FileInputStream(keystorePropertiesFile))
 }
 
 android {
@@ -31,11 +47,28 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        if (keystoreDisponible) {
+            create("release") {
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+                storeFile = file(keystoreProperties["storeFile"] as String)
+                storePassword = keystoreProperties["storePassword"] as String
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (keystoreDisponible) {
+                signingConfigs.getByName("release")
+            } else {
+                // Repli : `key.properties` absent (contributeur sans la cle,
+                // ou CI avant configuration des secrets). Permet au build de
+                // continuer, mais produit un APK signe differemment a chaque
+                // fois — voir le commentaire au-dessus de keystorePropertiesFile.
+                signingConfigs.getByName("debug")
+            }
 
             // Le "code shrinking" (R8) casse la (de)serialisation Gson interne
             // de flutter_local_notifications (TypeToken generique strippe),

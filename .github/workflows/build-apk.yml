@@ -18,6 +18,29 @@ jobs:
 
       - run: flutter pub get
 
+      # Reconstitue la cle de signature stable a partir des secrets du repo
+      # (KEYSTORE_BASE64, KEY_ALIAS, KEY_PASSWORD, STORE_PASSWORD), si
+      # configures. Sans ca, chaque run CI signe avec une cle debug generee
+      # au hasard sur cette machine ephemere : Android refuse alors chaque
+      # mise a jour comme un paquet different, forcant a desinstaller
+      # l'ancienne version (donc a perdre les donnees). Voir android/app/
+      # build.gradle.kts pour la logique de repli si ces secrets sont absents.
+      - name: Configurer la signature release
+        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > android/app/upload-keystore.jks
+          cat > android/key.properties <<EOF
+          storePassword=$STORE_PASSWORD
+          keyPassword=$KEY_PASSWORD
+          keyAlias=$KEY_ALIAS
+          storeFile=upload-keystore.jks
+          EOF
+
       - run: flutter build apk --release
 
       - uses: actions/upload-artifact@v6

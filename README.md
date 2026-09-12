@@ -59,6 +59,43 @@ Ajoutez la clé suivante (texte affiché lors de la demande Face ID) :
 <string>Utilisé pour déverrouiller l'application rapidement</string>
 ```
 
+### Signature Android release (important, a faire une seule fois)
+
+Sans cle de signature stable, chaque APK release est signe avec une cle
+debug generee au hasard sur la machine qui build (y compris a chaque run
+GitHub Actions). Android refuse alors d'installer une "mise a jour" signee
+differemment de l'app deja installee : il faut desinstaller l'ancienne
+version avant, ce qui efface toutes les donnees locales.
+
+Pour eviter ca, genere une cle **une seule fois** et reutilise-la pour
+toujours :
+
+```bash
+keytool -genkeypair -v -keystore android/app/upload-keystore.jks \
+  -storetype PKCS12 -keyalg RSA -keysize 2048 -validity 10000 \
+  -alias douka_moto_upload
+```
+
+Puis copie `android/key.properties.example` en `android/key.properties` et
+renseigne les mots de passe choisis a la generation (ce fichier est ignore
+par git, ne le commite jamais). Pour que le build GitHub Actions signe lui
+aussi avec cette meme cle, ajoute 4 secrets dans Settings > Secrets and
+variables > Actions du repo : `KEYSTORE_BASE64` (le fichier `.jks` encode en
+base64), `KEY_ALIAS`, `KEY_PASSWORD`, `STORE_PASSWORD`.
+
+**Sauvegarde ce fichier `.jks` et ses mots de passe ailleurs que dans ce
+depot** (gestionnaire de mots de passe, stockage cloud personnel...) : les
+perdre signifie ne plus jamais pouvoir publier de mise a jour sous la meme
+identite d'app.
+
+A partir de la mise en place de cette cle, une seule desinstallation
+manuelle sera encore necessaire (le temps de passer d'une ancienne signature
+debug a celle-ci) ; toutes les installations suivantes se feront ensuite
+comme des mises a jour normales, sans perte de donnees — a condition
+d'augmenter le numero de build a chaque publication (le `+N` a la fin de
+`version:` dans `pubspec.yaml`), sans quoi Android refuse aussi une mise a
+jour avec le meme numero ou un numero inferieur.
+
 ## 3. Structure du projet
 
 ```

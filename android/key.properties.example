@@ -1,0 +1,10 @@
+# Copie ce fichier en "key.properties" (meme dossier) et remplace les
+# valeurs par les tiennes, apres avoir genere ta cle de signature avec la
+# commande donnee dans le README / le message de Claude Code.
+#
+# "key.properties" est ignore par git (voir android/.gitignore) : il ne doit
+# JAMAIS etre commite, il contient des mots de passe en clair.
+storePassword=CHANGE_MOI
+keyPassword=CHANGE_MOI
+keyAlias=douka_moto_upload
+storeFile=upload-keystore.jks
