@@ -4,6 +4,12 @@
 /// + [lienId]) quand la dette concerne cette activite precise (ex: le
 /// chauffeur d'une moto qui doit de l'argent en plus de ses versements) ;
 /// laissee sans lien pour un pret personnel sans rapport avec l'app.
+///
+/// La devise n'est jamais fixe : une dette liee a une moto ou a une entite
+/// de categorie affiche toujours la devise de ce a quoi elle est liee (les
+/// motos utilisent la devise globale, une entite celle de sa categorie) —
+/// voir DatabaseService.deviseEffectiveDette(). [deviseSymbole] n'est utilise
+/// que pour une dette SANS lien, ou elle est choisie librement a la creation.
 class Dette {
   final int? id;
   final String nomPersonne;
@@ -14,6 +20,9 @@ class Dette {
   /// AppConstants.detteLienMoto | detteLienCategorieEntite | null
   final String? lienType;
   final int? lienId;
+  /// Devise propre a une dette SANS lien ; ignoree (et sans effet) si
+  /// [lienType] est renseigne, la devise venant alors du lien.
+  final String? deviseSymbole;
 
   Dette({
     this.id,
@@ -24,6 +33,7 @@ class Dette {
     DateTime? dateCreation,
     this.lienType,
     this.lienId,
+    this.deviseSymbole,
   }) : dateCreation = dateCreation ?? DateTime.now();
 
   Map<String, dynamic> toMap() {
@@ -36,6 +46,7 @@ class Dette {
       'date_creation': dateCreation.toIso8601String(),
       'lien_type': lienType,
       'lien_id': lienId,
+      'devise_symbole': deviseSymbole,
     };
   }
 
@@ -49,6 +60,7 @@ class Dette {
       dateCreation: DateTime.parse(map['date_creation'] as String),
       lienType: map['lien_type'] as String?,
       lienId: map['lien_id'] as int?,
+      deviseSymbole: map['devise_symbole'] as String?,
     );
   }
 }

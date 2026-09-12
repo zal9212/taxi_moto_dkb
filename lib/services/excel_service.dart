@@ -870,6 +870,9 @@ class ExcelService {
           final notes = _texte(_valeur(ligne, 4));
           final lienType = _texte(_valeur(ligne, 5));
           final lienIdTxt = _texte(_valeur(ligne, 6));
+          // Colonne 8 : absente des fichiers generes avant son ajout (voir
+          // _ecrireFeuillesDettes) — _valeur() renvoie alors simplement null.
+          final devise = _texte(_valeur(ligne, 8));
 
           if (nomPersonne == null || montantTxt == null || dateTxt == null) {
             rapport.erreurs.add(LigneErreurImport(
@@ -911,6 +914,10 @@ class ExcelService {
             notes: notes,
             lienType: lienTypeFinal,
             lienId: lienIdFinal,
+            // Sans effet si un lien est actif (deviseEffectiveDette() se
+            // base alors sur le lien) ; utile seulement pour une dette
+            // independante, ou comme simple valeur inerte sinon.
+            deviseSymbole: devise,
           );
 
           int idFinal;
@@ -1303,6 +1310,9 @@ class ExcelService {
         final notes = _texte(_valeur(ligne, 4));
         final lienType = _texte(_valeur(ligne, 5));
         final lienIdTxt = _texte(_valeur(ligne, 6));
+        // Colonne 8 : absente des fichiers generes avant son ajout (voir
+        // _ecrireFeuillesDettes) — _valeur() renvoie alors simplement null.
+        final devise = _texte(_valeur(ligne, 8));
 
         if (nomPersonne == null || montantTxt == null || dateTxt == null) {
           rapport.erreurs.add(LigneErreurImport(
@@ -1339,6 +1349,9 @@ class ExcelService {
           notes: notes,
           lienType: lienTypeFinal,
           lienId: lienIdFinal,
+          // Sans effet si un lien est actif (deviseEffectiveDette() se base
+          // alors sur le lien) ; utile seulement pour une dette independante.
+          deviseSymbole: devise,
         );
 
         int idFinal;
@@ -1443,6 +1456,10 @@ class ExcelService {
       TextCellValue('Lien type'),
       TextCellValue('Lien ID'),
       TextCellValue('Lien nom'),
+      // Ajoutee en derniere position (jamais inseree entre les colonnes
+      // existantes) : un ancien fichier sans cette colonne reste
+      // importable normalement, voir ExcelService._valeur().
+      TextCellValue('Devise'),
     ]);
     for (final d in dettes) {
       String? lienNom;
@@ -1452,6 +1469,9 @@ class ExcelService {
         final entite = await db.obtenirEntiteCategorie(d.lienId!);
         lienNom = entite?.nom;
       }
+      // Toujours la devise EFFECTIVE (celle du lien s'il y en a un), pour
+      // que le fichier reflete ce que l'app affiche reellement.
+      final devise = await db.deviseEffectiveDette(d);
       sDettes.appendRow([
         d.id != null ? IntCellValue(d.id!) : null,
         TextCellValue(d.nomPersonne),
@@ -1461,6 +1481,7 @@ class ExcelService {
         d.lienType != null ? TextCellValue(d.lienType!) : null,
         d.lienId != null ? IntCellValue(d.lienId!) : null,
         lienNom != null ? TextCellValue(lienNom) : null,
+        TextCellValue(devise),
       ]);
     }
 

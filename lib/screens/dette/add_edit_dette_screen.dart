@@ -36,12 +36,18 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
   late final TextEditingController _nomCtrl;
   late final TextEditingController _montantCtrl;
   late final TextEditingController _notesCtrl;
+  late final TextEditingController _deviseCtrl;
   DateTime _date = DateTime.now();
 
   late bool _lienFige;
   String? _lienType;
   int? _lienId;
   String? _lienNom;
+  // Devise du lien choisi (moto : toujours la devise globale : entite de
+  // categorie : celle de sa categorie) — affichee a titre informatif tant
+  // qu'un lien est actif, le champ devise libre etant alors sans effet.
+  String? _deviseLien;
+  String _deviseGlobale = AppConstants.devisePardDefaut;
 
   List<Moto> _motos = [];
   List<CategorieActivite> _categories = [];
@@ -60,6 +66,12 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
     _nomCtrl = TextEditingController(text: d?.nomPersonne ?? '');
     _montantCtrl = TextEditingController(text: d?.montantInitial.toStringAsFixed(0) ?? '');
     _notesCtrl = TextEditingController(text: d?.notes ?? '');
+    _deviseCtrl = TextEditingController(text: d?.deviseSymbole ?? '');
+    // Reconstruit l'ecran a la frappe pour que le libelle du montant
+    // ("Montant prete (FG)") reste a jour avec la devise en cours de saisie.
+    _deviseCtrl.addListener(() {
+      if (mounted) setState(() {});
+    });
     if (d != null) _date = d.date;
 
     _lienType = d?.lienType ?? widget.lienTypeInitial;
@@ -73,10 +85,16 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
   Future<void> _charger() async {
     final motos = await _db.listerMotos();
     final categories = await _db.listerCategoriesActivite();
+    final params = await _db.obtenirParametres();
     if (!mounted) return;
     setState(() {
       _motos = motos;
       _categories = categories;
+      _deviseGlobale = params.deviseSymbole;
+      // Devise libre par defaut = devise globale, uniquement si rien n'est
+      // deja saisi (nouvelle dette, ou ancienne dette sans devise stockee) ;
+      // sans effet si la dette finit par etre liee a une moto/entite.
+      if (_deviseCtrl.text.isEmpty) _deviseCtrl.text = params.deviseSymbole;
       _chargement = false;
     });
 
@@ -97,6 +115,34 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
         }
       }
     }
+
+    // Devise du lien deja connu au chargement (lien fige depuis une fiche
+    // moto/entite, ou dette existante deja liee) : resolue directement via
+    // _lienId, disponible dans les deux cas (contrairement a
+    // _categorieChoisieId, rempli seulement en mode edition ci-dessus).
+    if (_lienType == AppConstants.detteLienMoto && _lienId != null) {
+      setState(() => _deviseLien = params.deviseSymbole);
+    } else if (_lienType == AppConstants.detteLienCategorieEntite && _lienId != null) {
+      final entite = await _db.obtenirEntiteCategorie(_lienId!);
+      if (entite != null) {
+        final categorie = categories.where((c) => c.id == entite.categorieId).toList();
+        if (categorie.isNotEmpty && mounted) setState(() => _deviseLien = categorie.first.deviseSymbole);
+      }
+    }
+  }
+
+  void _mettreAJourDeviseCategorie() {
+    final categorie = _categories.where((c) => c.id == _categorieChoisieId).toList();
+    if (categorie.isNotEmpty) setState(() => _deviseLien = categorie.first.deviseSymbole);
+  }
+
+  /// Devise a afficher a titre indicatif pres du montant : celle du lien
+  /// actif s'il y en a un, sinon celle saisie librement (ou la globale par
+  /// defaut tant que rien n'est encore tape).
+  String _deviseEffectiveAffichee() {
+    if (_deviseLien != null) return _deviseLien!;
+    final saisie = _deviseCtrl.text.trim();
+    return saisie.isEmpty ? _deviseGlobale : saisie;
   }
 
   Future<void> _choisirCategorieEntite() async {
@@ -119,6 +165,9 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
         dateCreation: widget.detteExistante?.dateCreation,
         lienType: _lienId != null ? _lienType : null,
         lienId: _lienId,
+        // Sans effet des qu'un lien est actif (la devise vient alors de la
+        // moto/entite liee) : n'a d'importance que pour une dette independante.
+        deviseSymbole: _deviseCtrl.text.trim().isEmpty ? null : _deviseCtrl.text.trim(),
       );
 
       if (_modeEdition) {
@@ -158,7 +207,7 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
                     const SizedBox(height: 12),
                     TextFormField(
                       controller: _montantCtrl,
-                      decoration: const InputDecoration(labelText: 'Montant prete'),
+                      decoration: InputDecoration(labelText: 'Montant prete (${_deviseEffectiveAffichee()})'),
                       keyboardType: const TextInputType.numberWithOptions(decimal: true),
                       validator: (v) =>
                           (double.tryParse((v ?? '').replaceAll(' ', '')) == null) ? 'Montant invalide' : null,
@@ -207,7 +256,13 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
                           children: [
                             const Icon(Icons.link, size: 16, color: AppColors.texteGris),
                             const SizedBox(width: 8),
-                            Text(_lienNom ?? '...', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                            Expanded(
+                              child: Text(_lienNom ?? '...',
+                                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                            ),
+                            if (_deviseLien != null)
+                              Text('devise : $_deviseLien',
+                                  style: TextStyle(color: AppColors.texteGris, fontSize: 10)),
                           ],
                         ),
                       )
@@ -221,6 +276,16 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
                           Expanded(child: _puceLien('Une categorie', AppConstants.detteLienCategorieEntite)),
                         ],
                       ),
+                      if (_lienType == null) ...[
+                        const SizedBox(height: 10),
+                        TextFormField(
+                          controller: _deviseCtrl,
+                          decoration: const InputDecoration(
+                            labelText: 'Devise',
+                            helperText: 'Ex: FG, FCFA, GNF — propre a cette dette independante',
+                          ),
+                        ),
+                      ],
                       if (_lienType == AppConstants.detteLienMoto) ...[
                         const SizedBox(height: 10),
                         DropdownButtonFormField<int>(
@@ -247,6 +312,7 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
                               _entitesCategorieChoisie = [];
                             });
                             _choisirCategorieEntite();
+                            _mettreAJourDeviseCategorie();
                           },
                         ),
                         const SizedBox(height: 10),
@@ -258,6 +324,11 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
                               .toList(),
                           onChanged: (v) => setState(() => _lienId = v),
                         ),
+                        if (_deviseLien != null) ...[
+                          const SizedBox(height: 6),
+                          Text('Devise de cette categorie : $_deviseLien',
+                              style: TextStyle(color: AppColors.texteGris, fontSize: 10)),
+                        ],
                       ],
                     ],
                     const SizedBox(height: 24),
@@ -278,6 +349,11 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
       onTap: () => setState(() {
         _lienType = valeur;
         _lienId = null;
+        _categorieChoisieId = null;
+        _entitesCategorieChoisie = [];
+        // Une moto est toujours dans la devise globale, connue tout de
+        // suite ; une categorie n'a pas encore ete choisie a ce stade.
+        _deviseLien = valeur == AppConstants.detteLienMoto ? _deviseGlobale : null;
       }),
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 10),

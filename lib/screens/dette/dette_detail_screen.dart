@@ -44,7 +44,7 @@ class _DetteDetailScreenState extends State<DetteDetailScreen> {
     }
     final remboursements = await _db.listerRemboursements(widget.detteId);
     final solde = await _db.soldeDette(widget.detteId);
-    final params = await _db.obtenirParametres();
+    final devise = await _db.deviseEffectiveDette(dette);
 
     String? lienNom;
     if (dette.lienType == AppConstants.detteLienMoto && dette.lienId != null) {
@@ -60,7 +60,7 @@ class _DetteDetailScreenState extends State<DetteDetailScreen> {
       _dette = dette;
       _remboursements = remboursements;
       _solde = solde;
-      _devise = params.deviseSymbole;
+      _devise = devise;
       _lienNom = lienNom;
       _chargement = false;
     });

@@ -182,6 +182,12 @@ class DatabaseService {
       // v4 : suivi des dettes personnelles. Purement additif.
       await _creerTablesDettes(db);
     }
+
+    if (oldVersion < 5) {
+      // v5 : devise propre a une dette sans lien (une dette liee garde
+      // toujours la devise de la moto/entite concernee). Purement additif.
+      await db.execute('ALTER TABLE dettes ADD COLUMN devise_symbole TEXT');
+    }
   }
 
   /// Tables du systeme generique de categories d'activite (ex: Boutiques),
@@ -273,7 +279,8 @@ class DatabaseService {
         notes TEXT,
         date_creation TEXT NOT NULL,
         lien_type TEXT,
-        lien_id INTEGER
+        lien_id INTEGER,
+        devise_symbole TEXT
       )
     ''');
 
@@ -1176,17 +1183,44 @@ class DatabaseService {
     return dette.montantInitial - totalRembourse;
   }
 
-  /// Somme des montants encore dus, toutes dettes non soldees confondues.
-  Future<double> totalDettesEnCours() async {
+  /// Devise effective d'une dette : celle de la moto ou de l'entite liee si
+  /// elle en a une (une moto utilise toujours la devise globale, une entite
+  /// celle de sa categorie) — jamais celle stockee sur la dette elle-meme
+  /// dans ce cas. Sans lien, c'est la devise propre choisie a la creation
+  /// ([Dette.deviseSymbole]), ou la devise globale en repli (dette creee
+  /// avant l'ajout de ce champ, ou jamais renseignee).
+  Future<String> deviseEffectiveDette(Dette dette) async {
+    if (dette.lienType == AppConstants.detteLienMoto) {
+      return (await obtenirParametres()).deviseSymbole;
+    }
+    if (dette.lienType == AppConstants.detteLienCategorieEntite && dette.lienId != null) {
+      final entite = await obtenirEntiteCategorie(dette.lienId!);
+      if (entite != null) {
+        final categorie = await obtenirCategorieActivite(entite.categorieId);
+        if (categorie != null) return categorie.deviseSymbole;
+      }
+    }
+    if (dette.deviseSymbole != null && dette.deviseSymbole!.isNotEmpty) {
+      return dette.deviseSymbole!;
+    }
+    return (await obtenirParametres()).deviseSymbole;
+  }
+
+  /// Somme des montants encore dus, toutes dettes non soldees confondues,
+  /// groupee par devise effective (une dette en FG et une en FCFA ne
+  /// peuvent pas etre additionnees dans un seul total).
+  Future<Map<String, double>> totauxDettesEnCoursParDevise() async {
     final db = await database;
     final dettes = await db.query('dettes');
-    double total = 0;
+    final totaux = <String, double>{};
     for (final map in dettes) {
       final dette = Dette.fromMap(map);
       if (dette.id == null) continue;
       final solde = await soldeDette(dette.id!);
-      if (solde > 0) total += solde;
+      if (solde <= 0) continue;
+      final devise = await deviseEffectiveDette(dette);
+      totaux[devise] = (totaux[devise] ?? 0) + solde;
     }
-    return total;
+    return totaux;
   }
 }

@@ -22,7 +22,12 @@ class _DettesScreenState extends State<DettesScreen> {
   final _db = DatabaseService.instance;
   List<Dette> _dettes = [];
   final Map<int, double> _soldes = {};
-  String _devise = AppConstants.devisePardDefaut;
+  // Devise effective de chaque dette (celle de son lien, ou la sienne
+  // propre si independante) : jamais une seule devise globale, deux dettes
+  // liees a des activites differentes pouvant tres bien ne pas partager la
+  // meme devise (ex: une moto en FG, une boutique en FCFA).
+  final Map<int, String> _devises = {};
+  String _deviseParDefaut = AppConstants.devisePardDefaut;
   bool _chargement = true;
   bool _exportEnCours = false;
   bool _importEnCours = false;
@@ -38,18 +43,33 @@ class _DettesScreenState extends State<DettesScreen> {
     final dettes = await _db.listerDettes();
     final params = await _db.obtenirParametres();
     _soldes.clear();
+    _devises.clear();
     for (final d in dettes) {
-      if (d.id != null) _soldes[d.id!] = await _db.soldeDette(d.id!);
+      if (d.id == null) continue;
+      _soldes[d.id!] = await _db.soldeDette(d.id!);
+      _devises[d.id!] = await _db.deviseEffectiveDette(d);
     }
     if (!mounted) return;
     setState(() {
       _dettes = dettes;
-      _devise = params.deviseSymbole;
+      _deviseParDefaut = params.deviseSymbole;
       _chargement = false;
     });
   }
 
-  double get _totalEnCours => _soldes.values.where((s) => s > 0).fold(0.0, (a, b) => a + b);
+  /// Totaux en cours groupes par devise (voir [_devises]) : additionner des
+  /// dettes dans des devises differentes n'aurait aucun sens.
+  Map<String, double> get _totauxParDevise {
+    final totaux = <String, double>{};
+    for (final d in _dettes) {
+      if (d.id == null) continue;
+      final solde = _soldes[d.id!] ?? 0;
+      if (solde <= 0) continue;
+      final devise = _devises[d.id!] ?? _deviseParDefaut;
+      totaux[devise] = (totaux[devise] ?? 0) + solde;
+    }
+    return totaux;
+  }
 
   Future<void> _exporter() async {
     setState(() => _exportEnCours = true);
@@ -213,10 +233,21 @@ class _DettesScreenState extends State<DettesScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('Total en cours', style: TextStyle(color: AppColors.texteGris, fontSize: 10)),
+                        const Text('Total en cours', style: TextStyle(color: AppColors.texteGris, fontSize: 10)),
                         const SizedBox(height: 4),
-                        Text(formaterMontant(_totalEnCours, _devise),
-                            style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w600)),
+                        if (_totauxParDevise.isEmpty)
+                          Text(formaterMontant(0, _deviseParDefaut),
+                              style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w600))
+                        else
+                          // Une ligne par devise : des dettes liees a des
+                          // activites differentes (moto vs boutique, par
+                          // exemple) peuvent tres bien ne pas partager la
+                          // meme devise, un seul total les melangerait.
+                          ..._totauxParDevise.entries.map(
+                            (e) => Text(formaterMontant(e.value, e.key),
+                                style:
+                                    const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w600)),
+                          ),
                       ],
                     ),
                   ),
@@ -239,6 +270,7 @@ class _DettesScreenState extends State<DettesScreen> {
 
   Widget _ligneDette(Dette d) {
     final solde = _soldes[d.id] ?? d.montantInitial;
+    final devise = _devises[d.id] ?? _deviseParDefaut;
     final soldee = solde <= 0;
     return InkWell(
       onTap: () async {
@@ -266,7 +298,7 @@ class _DettesScreenState extends State<DettesScreen> {
               ),
             ),
             Text(
-              soldee ? 'Soldee' : formaterMontant(solde, _devise),
+              soldee ? 'Soldee' : formaterMontant(solde, devise),
               style: TextStyle(
                 color: soldee ? AppColors.succes : AppColors.danger,
                 fontWeight: FontWeight.w600,

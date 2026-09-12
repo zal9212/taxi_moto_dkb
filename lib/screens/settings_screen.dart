@@ -33,7 +33,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _restaurationEnCours = false;
   bool _exportExcelEnCours = false;
   bool _importExcelEnCours = false;
-  double _totalDettes = 0;
+  Map<String, double> _totauxDettes = {};
 
   @override
   void initState() {
@@ -45,13 +45,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final p = await _db.obtenirParametres();
     final bioDispo = await AuthService.biometrieDisponible();
     final pinConfigure = await AuthService.pinConfigure();
-    final totalDettes = await _db.totalDettesEnCours();
+    final totauxDettes = await _db.totauxDettesEnCoursParDevise();
     if (!mounted) return;
     setState(() {
       _parametres = p;
       _biometrieDisponible = bioDispo;
       _pinConfigure = pinConfigure;
-      _totalDettes = totalDettes;
+      _totauxDettes = totauxDettes;
     });
   }
 
@@ -595,7 +595,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: 10),
           _carteReglage(
             titre: 'Dettes',
-            valeur: formaterMontant(_totalDettes, _parametres?.deviseSymbole ?? ''),
+            valeur: formaterTotauxParDevise(_totauxDettes, _parametres?.deviseSymbole ?? ''),
             icone: Icons.request_page_outlined,
             onTap: () async {
               await Navigator.push(context, MaterialPageRoute(builder: (_) => const DettesScreen()));
