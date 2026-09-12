@@ -1,7 +1,7 @@
 name: moto_taxi_douka
 description: "Application de gestion des versements de motos-taxis"
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.1+2
 
 environment:
   sdk: '>=3.3.0 <4.0.0'

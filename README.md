@@ -91,10 +91,16 @@ identite d'app.
 A partir de la mise en place de cette cle, une seule desinstallation
 manuelle sera encore necessaire (le temps de passer d'une ancienne signature
 debug a celle-ci) ; toutes les installations suivantes se feront ensuite
-comme des mises a jour normales, sans perte de donnees — a condition
-d'augmenter le numero de build a chaque publication (le `+N` a la fin de
-`version:` dans `pubspec.yaml`), sans quoi Android refuse aussi une mise a
-jour avec le meme numero ou un numero inferieur.
+comme des mises a jour normales, sans perte de donnees.
+
+Le numero de build (le `+N` a la fin de `version:` dans `pubspec.yaml`) doit
+lui aussi strictement augmenter a chaque publication, sinon Android refuse la
+mise a jour meme avec la bonne signature. C'est automatise : le workflow
+GitHub Actions (`.github/workflows/build-apk.yml`) le remplace a chaque build
+par le numero de run GitHub (`--build-number=${{ github.run_number }}`), qui
+augmente tout seul — rien a modifier a la main dans `pubspec.yaml` pour ça.
+Le nom de version (`1.0.1` avant le `+`) reste sous ton controle, a changer
+seulement quand tu veux marquer une vraie nouvelle version.
 
 ## 3. Structure du projet
 

@@ -41,7 +41,13 @@ jobs:
           storeFile=upload-keystore.jks
           EOF
 
-      - run: flutter build apk --release
+      # --build-number ecrase le numero apres le "+" de pubspec.yaml (versionCode
+      # Android) par le numero de run GitHub Actions, qui augmente tout seul a
+      # chaque build : plus besoin d'y penser ni de modifier pubspec.yaml avant
+      # de pousser. Le nom de version (1.0.1, avant le "+") reste, lui, celui de
+      # pubspec.yaml — a changer a la main seulement quand tu veux marquer une
+      # vraie nouvelle version.
+      - run: flutter build apk --release --build-number=${{ github.run_number }}
 
       - uses: actions/upload-artifact@v6
         with:
