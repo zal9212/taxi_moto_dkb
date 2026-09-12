@@ -226,9 +226,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       builder: (context) => AlertDialog(
         title: const Text('Restaurer cette sauvegarde ?'),
         content: const Text(
-            'Toutes les donnees actuelles (motos, versements, depenses) seront '
-            'definitivement remplacees par celles de cette sauvegarde. Cette '
-            'action est irreversible.'),
+            'Toutes les donnees actuelles (motos, versements, depenses, '
+            'categories et dettes) seront definitivement remplacees par '
+            'celles de cette sauvegarde. Cette action est irreversible.'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Annuler')),
           TextButton(
@@ -310,9 +310,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
         builder: (context) => AlertDialog(
           title: const Text('Tout remplacer ?'),
           content: const Text(
-              'Toutes les donnees actuelles (motos, versements, depenses) seront '
-              'definitivement effacees et remplacees par celles du fichier Excel. '
-              'Cette action est irreversible.'),
+              'Toutes les donnees actuelles (motos, versements, depenses, et, '
+              'si le fichier les contient, categories et dettes) seront '
+              'definitivement effacees et remplacees par celles du fichier '
+              'Excel. Cette action est irreversible.'),
           actions: [
             TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Annuler')),
             TextButton(
@@ -356,6 +357,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (rapport.versementsMisAJour > 0) '${rapport.versementsMisAJour} versement(s) mis a jour',
       if (rapport.depensesCreees > 0) '${rapport.depensesCreees} depense(s) creee(s)',
       if (rapport.depensesMisesAJour > 0) '${rapport.depensesMisesAJour} depense(s) mise(s) a jour',
+      if (rapport.categoriesCreees > 0) '${rapport.categoriesCreees} categorie(s) creee(s)',
+      if (rapport.categoriesMisesAJour > 0) '${rapport.categoriesMisesAJour} categorie(s) mise(s) a jour',
+      if (rapport.entitesCreees > 0) '${rapport.entitesCreees} entite(s) creee(s)',
+      if (rapport.entitesMisesAJour > 0) '${rapport.entitesMisesAJour} entite(s) mise(s) a jour',
+      if (rapport.transactionsCreees > 0) '${rapport.transactionsCreees} transaction(s) creee(s)',
+      if (rapport.transactionsMisesAJour > 0) '${rapport.transactionsMisesAJour} transaction(s) mise(s) a jour',
+      if (rapport.dettesCreees > 0) '${rapport.dettesCreees} dette(s) creee(s)',
+      if (rapport.dettesMisesAJour > 0) '${rapport.dettesMisesAJour} dette(s) mise(s) a jour',
+      if (rapport.remboursementsCrees > 0) '${rapport.remboursementsCrees} remboursement(s) cree(s)',
+      if (rapport.remboursementsMisAJour > 0) '${rapport.remboursementsMisAJour} remboursement(s) mis a jour',
     ];
     await showDialog<void>(
       context: context,
@@ -513,7 +524,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ListTile(
                   leading: const Icon(Icons.backup_outlined, size: 20),
                   title: const Text('Exporter mes donnees', style: TextStyle(fontSize: 13)),
-                  subtitle: const Text('Sauvegarde complete : motos, versements, depenses',
+                  subtitle: const Text(
+                      'Sauvegarde complete : motos, versements, depenses, categories et dettes',
                       style: TextStyle(fontSize: 10)),
                   trailing: _sauvegardeEnCours
                       ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
@@ -547,7 +559,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ListTile(
                   leading: const Icon(Icons.table_chart_outlined, size: 20),
                   title: const Text('Exporter en Excel', style: TextStyle(fontSize: 13)),
-                  subtitle: const Text('Fichier .xlsx lisible et modifiable', style: TextStyle(fontSize: 10)),
+                  subtitle: const Text(
+                      'Fichier .xlsx lisible et modifiable - motos, categories et dettes incluses',
+                      style: TextStyle(fontSize: 10)),
                   trailing: _exportExcelEnCours
                       ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
                       : const Icon(Icons.chevron_right, size: 18),

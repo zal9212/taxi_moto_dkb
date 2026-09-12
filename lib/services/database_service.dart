@@ -914,6 +914,24 @@ class DatabaseService {
     });
   }
 
+  /// Efface TOUTES les categories d'activite generiques et tout leur
+  /// contenu (champs, entites, transactions, valeurs) — utilise pour un
+  /// import Excel global en mode "tout remplacer" quand le fichier
+  /// contient une feuille "Categories". Revient automatiquement sur Motos
+  /// (categorie active remise a null). Irreversible.
+  Future<void> viderToutesLesCategoriesActivite() async {
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.delete('categorie_transaction_valeurs');
+      await txn.delete('categorie_transactions');
+      await txn.delete('categorie_entite_valeurs');
+      await txn.delete('categorie_entites');
+      await txn.delete('categorie_champs');
+      await txn.delete('categories_activite');
+      await txn.update('parametres', {'categorie_active_id': null}, where: 'id = ?', whereArgs: [1]);
+    });
+  }
+
   // -- Entites --
 
   Future<int> insererEntiteCategorie(CategorieEntite e) async {
