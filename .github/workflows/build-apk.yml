@@ -8,6 +8,12 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Le secret est remonte en variable d'environnement de JOB (et non de
+    # step) car le contexte "secrets" n'est pas autorise directement dans un
+    # "if:" d'etape — seul le contexte "env" au niveau job l'est. Voir le
+    # "if:" de l'etape "Configurer la signature release" plus bas.
+    env:
+      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
     steps:
       - uses: actions/checkout@v5
 
@@ -26,9 +32,8 @@ jobs:
       # l'ancienne version (donc a perdre les donnees). Voir android/app/
       # build.gradle.kts pour la logique de repli si ces secrets sont absents.
       - name: Configurer la signature release
-        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
+        if: ${{ env.KEYSTORE_BASE64 != '' }}
         env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
