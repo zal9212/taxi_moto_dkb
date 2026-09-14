@@ -43,7 +43,13 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
   Future<void> _charger() async {
     setState(() => _chargement = true);
     final moto = await _db.obtenirMoto(widget.motoId);
-    if (moto == null) return;
+    if (moto == null) {
+      // Moto supprimee entre-temps (ex: lien depuis une dette vers une moto
+      // qui n'existe plus) : referme l'ecran au lieu de rester bloque en
+      // chargement infini.
+      if (mounted) Navigator.pop(context);
+      return;
+    }
 
     // Maintient la fenetre d'echeances a venir pleine (versement recurrent
     // et indefini, pas de montant total a atteindre).

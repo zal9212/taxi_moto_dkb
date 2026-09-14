@@ -48,6 +48,11 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
   // qu'un lien est actif, le champ devise libre etant alors sans effet.
   String? _deviseLien;
   String _deviseGlobale = AppConstants.devisePardDefaut;
+  // Renseigne quand la dette avait un lien enregistre mais que la moto/
+  // entite visee n'existe plus : le lien est alors reinitialise a "Aucun"
+  // dans le formulaire (sinon le menu deroulant planterait, sa valeur ne
+  // correspondant plus a aucun item) et ce message explique pourquoi.
+  String? _messageLienSupprime;
 
   List<Moto> _motos = [];
   List<CategorieActivite> _categories = [];
@@ -105,13 +110,29 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
     if (_modeEdition && _lienNom == null && _lienType != null && _lienId != null) {
       if (_lienType == AppConstants.detteLienMoto) {
         final moto = motos.where((m) => m.id == _lienId).toList();
-        if (moto.isNotEmpty && mounted) setState(() => _lienNom = moto.first.nom);
+        if (moto.isNotEmpty && mounted) {
+          setState(() => _lienNom = moto.first.nom);
+        } else if (mounted) {
+          setState(() {
+            _lienType = null;
+            _lienId = null;
+            _messageLienSupprime =
+                'La moto liee a cette dette a ete supprimee. Choisissez-en une autre ou laissez sans lien.';
+          });
+        }
       } else if (_lienType == AppConstants.detteLienCategorieEntite) {
         final entite = await _db.obtenirEntiteCategorie(_lienId!);
         if (entite != null && mounted) {
           setState(() => _lienNom = entite.nom);
           setState(() => _categorieChoisieId = entite.categorieId);
           await _choisirCategorieEntite();
+        } else if (mounted) {
+          setState(() {
+            _lienType = null;
+            _lienId = null;
+            _messageLienSupprime =
+                'L\'entite liee a cette dette a ete supprimee. Choisissez-en une autre ou laissez sans lien.';
+          });
         }
       }
     }
@@ -244,6 +265,26 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
                       style: TextStyle(color: AppColors.texteGris, fontSize: 10),
                     ),
                     const SizedBox(height: 10),
+                    if (_messageLienSupprime != null) ...[
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: AppColors.dangerFond,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.link_off, size: 15, color: AppColors.danger),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(_messageLienSupprime!,
+                                  style: const TextStyle(color: AppColors.danger, fontSize: 11)),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                    ],
                     if (_lienFige)
                       Container(
                         padding: const EdgeInsets.all(12),

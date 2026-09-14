@@ -244,9 +244,44 @@ class _CategoriesScreenState extends State<_CategoriesScreen> {
       ),
     );
     if (nom != null && nom.isNotEmpty) {
-      await _db.insererCategorie(CategorieDepense(nom: nom, icone: 'dots'));
-      _charger();
+      try {
+        await _db.insererCategorie(CategorieDepense(nom: nom, icone: 'dots'));
+        _charger();
+      } catch (e) {
+        // "nom" est UNIQUE en base : une categorie du meme nom (casse
+        // exacte) existe deja. Sans ce catch, l'exception SQLite remonte
+        // non geree et l'ajout echoue silencieusement, sans que
+        // l'utilisateur comprenne pourquoi.
+        if (mounted) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(content: Text('Une categorie "$nom" existe deja.')));
+        }
+      }
     }
+  }
+
+  Future<void> _supprimerCategorie(CategorieDepense c) async {
+    final confirme = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Supprimer "${c.nom}" ?'),
+        content: const Text(
+            'Les depenses existantes deja enregistrees dans cette categorie ne '
+            'seront pas supprimees, mais elles ne pourront plus etre rattachees '
+            'a son nom (elles s\'afficheront comme "Depense" generique).'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Annuler')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: TextButton.styleFrom(foregroundColor: AppColors.danger),
+            child: const Text('Supprimer'),
+          ),
+        ],
+      ),
+    );
+    if (confirme != true || c.id == null) return;
+    await _db.supprimerCategorie(c.id!);
+    _charger();
   }
 
   @override
@@ -262,10 +297,7 @@ class _CategoriesScreenState extends State<_CategoriesScreen> {
             title: Text(c.nom),
             trailing: IconButton(
               icon: const Icon(Icons.delete_outline, color: AppColors.danger),
-              onPressed: () async {
-                if (c.id != null) await _db.supprimerCategorie(c.id!);
-                _charger();
-              },
+              onPressed: () => _supprimerCategorie(c),
             ),
           );
         },

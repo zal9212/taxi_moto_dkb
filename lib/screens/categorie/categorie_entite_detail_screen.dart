@@ -45,7 +45,13 @@ class _CategorieEntiteDetailScreenState extends State<CategorieEntiteDetailScree
   Future<void> _charger() async {
     setState(() => _chargement = true);
     final entite = await _db.obtenirEntiteCategorie(widget.entiteId);
-    if (entite == null) return;
+    if (entite == null) {
+      // Entite supprimee entre-temps (ex: lien depuis une dette vers une
+      // entite qui n'existe plus) : referme l'ecran au lieu de rester
+      // bloque en chargement infini.
+      if (mounted) Navigator.pop(context);
+      return;
+    }
     final transactions = await _db.listerTransactionsEntite(widget.entiteId);
     final solde = await _db.soldeEntiteCategorie(widget.entiteId);
     final dettes = await _db.listerDettesParLien(AppConstants.detteLienCategorieEntite, widget.entiteId);

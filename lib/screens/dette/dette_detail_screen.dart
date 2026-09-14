@@ -27,6 +27,10 @@ class _DetteDetailScreenState extends State<DetteDetailScreen> {
   double _solde = 0;
   String _devise = AppConstants.devisePardDefaut;
   String? _lienNom;
+  // true quand la dette a un lien enregistre (lienType/lienId) mais que la
+  // moto ou l'entite visee n'existe plus (supprimee depuis) : affiche un
+  // message clair au lieu d'un lien muet ou d'un ecran qui ne charge jamais.
+  bool _lienSupprime = false;
   bool _chargement = true;
 
   @override
@@ -47,12 +51,15 @@ class _DetteDetailScreenState extends State<DetteDetailScreen> {
     final devise = await _db.deviseEffectiveDette(dette);
 
     String? lienNom;
+    var lienSupprime = false;
     if (dette.lienType == AppConstants.detteLienMoto && dette.lienId != null) {
       final moto = await _db.obtenirMoto(dette.lienId!);
       lienNom = moto?.nom;
+      lienSupprime = moto == null;
     } else if (dette.lienType == AppConstants.detteLienCategorieEntite && dette.lienId != null) {
       final entite = await _db.obtenirEntiteCategorie(dette.lienId!);
       lienNom = entite?.nom;
+      lienSupprime = entite == null;
     }
 
     if (!mounted) return;
@@ -62,6 +69,7 @@ class _DetteDetailScreenState extends State<DetteDetailScreen> {
       _solde = solde;
       _devise = devise;
       _lienNom = lienNom;
+      _lienSupprime = lienSupprime;
       _chargement = false;
     });
   }
@@ -70,10 +78,19 @@ class _DetteDetailScreenState extends State<DetteDetailScreen> {
     final dette = _dette;
     if (dette?.lienType == null || dette?.lienId == null) return;
     if (dette!.lienType == AppConstants.detteLienMoto) {
+      final moto = await _db.obtenirMoto(dette.lienId!);
+      if (moto == null) {
+        if (mounted) _afficherLienSupprime('Cette moto a ete supprimee.');
+        return;
+      }
+      if (!mounted) return;
       await Navigator.push(context, MaterialPageRoute(builder: (_) => MotoDetailScreen(motoId: dette.lienId!)));
     } else if (dette.lienType == AppConstants.detteLienCategorieEntite) {
       final entite = await _db.obtenirEntiteCategorie(dette.lienId!);
-      if (entite == null || !mounted) return;
+      if (entite == null) {
+        if (mounted) _afficherLienSupprime('Cette entite (boutique, etc.) a ete supprimee.');
+        return;
+      }
       final categorie = await _db.obtenirCategorieActivite(entite.categorieId);
       if (categorie == null || !mounted) return;
       await Navigator.push(
@@ -82,6 +99,14 @@ class _DetteDetailScreenState extends State<DetteDetailScreen> {
       );
     }
     _charger();
+  }
+
+  void _afficherLienSupprime(String message) {
+    // Le lien enregistre pointe sur un id qui n'existe plus en base :
+    // recharge l'ecran pour refleter l'etat "supprime" a l'affichage,
+    // plutot que de rester sur l'ancien libelle en cache.
+    _charger();
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _ajouterRemboursement() async {
@@ -242,21 +267,33 @@ class _DetteDetailScreenState extends State<DetteDetailScreen> {
                 child: Container(
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    color: Colors.white,
+                    color: _lienSupprime ? AppColors.dangerFond : Colors.white,
                     borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: AppColors.bordure, width: 0.6),
+                    border: Border.all(color: _lienSupprime ? AppColors.danger : AppColors.bordure, width: 0.6),
                   ),
                   child: Row(
                     children: [
-                      const Icon(Icons.link, size: 16, color: AppColors.texteGris),
+                      Icon(
+                        _lienSupprime ? Icons.link_off : Icons.link,
+                        size: 16,
+                        color: _lienSupprime ? AppColors.danger : AppColors.texteGris,
+                      ),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
-                          _lienNom ?? '...',
-                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                          _lienSupprime
+                              ? (dette.lienType == AppConstants.detteLienMoto
+                                  ? 'Moto supprimee'
+                                  : 'Entite supprimee')
+                              : (_lienNom ?? '...'),
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: _lienSupprime ? AppColors.danger : null,
+                          ),
                         ),
                       ),
-                      const Icon(Icons.chevron_right, size: 18, color: AppColors.texteGris),
+                      Icon(Icons.chevron_right, size: 18, color: _lienSupprime ? AppColors.danger : AppColors.texteGris),
                     ],
                   ),
                 ),
