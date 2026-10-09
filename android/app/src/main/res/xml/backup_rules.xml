@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11 et moins : memes regles que data_extraction_rules.xml.
+     requireFlags (Android 9+) n'inclut la base que si la sauvegarde est
+     chiffree par le verrouillage d'ecran : une extraction "adb backup" ne
+     l'est pas, la base n'y figure donc pas (motif de l'audit 6ade731). -->
+<full-backup-content>
+    <include domain="database" path="." requireFlags="clientSideEncryption" />
+</full-backup-content>
