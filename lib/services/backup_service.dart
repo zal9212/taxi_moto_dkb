@@ -4,7 +4,9 @@ import 'package:file_picker/file_picker.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:sqflite/sqflite.dart';
 
+import '../core/constants.dart';
 import 'database_service.dart';
 
 /// Sauvegarde et restauration locales : exporte/importe le fichier de base
@@ -50,9 +52,12 @@ class BackupService {
   /// Ouvre le selecteur de fichiers et retourne le chemin choisi (ou null
   /// si l'utilisateur annule).
   static Future<String?> choisirFichierSauvegarde() async {
+    // Pas de filtre ".db" : sur Android, une extension sans type de fichier
+    // connu rend la sauvegarde grisee (impossible a choisir, surtout depuis
+    // WhatsApp ou Telechargements). Le contenu est verifie a la restauration
+    // (voir _verifierSauvegarde), un mauvais fichier est refuse proprement.
     final resultat = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['db'],
+      type: FileType.any,
       dialogTitle: 'Choisir une sauvegarde (.db)',
     );
     if (resultat == null || resultat.files.isEmpty) return null;
@@ -67,10 +72,48 @@ class BackupService {
     if (!await fichierChoisi.exists()) {
       throw Exception('Fichier introuvable.');
     }
+    // Verifie AVANT d'ecraser quoi que ce soit : un mauvais fichier rendait
+    // l'app inutilisable et faisait perdre toutes les donnees.
+    await _verifierSauvegarde(cheminFichierChoisi);
 
     await DatabaseService.instance.fermer();
     final cheminDestination = await DatabaseService.instance.cheminBaseDeDonnees();
-    await fichierChoisi.copy(cheminDestination);
+    final copieSecours = File('$cheminDestination.bak');
+    if (await File(cheminDestination).exists()) await File(cheminDestination).copy(copieSecours.path);
+    try {
+      // Fichiers annexes de l'ancienne base : melanges a la nouvelle, ils la
+      // corrompraient.
+      for (final suffixe in ['-wal', '-shm', '-journal']) {
+        final annexe = File('$cheminDestination$suffixe');
+        if (await annexe.exists()) await annexe.delete();
+      }
+      await fichierChoisi.copy(cheminDestination);
+    } catch (_) {
+      // Copie interrompue (stockage plein...) : on remet la base d'avant.
+      if (await copieSecours.exists()) await copieSecours.copy(cheminDestination);
+      rethrow;
+    }
+  }
+
+  static const _pasUneSauvegarde = 'Ce fichier n\'est pas une sauvegarde de l\'application.';
+
+  /// Leve une exception claire si le fichier n'est pas une sauvegarde de
+  /// l'app, ou s'il vient d'une version plus recente qu'elle ne sait pas lire.
+  static Future<void> _verifierSauvegarde(String chemin) async {
+    Database? sauvegarde;
+    try {
+      sauvegarde = await openDatabase(chemin, readOnly: true, singleInstance: false);
+      final tables = await sauvegarde.rawQuery("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'motos'");
+      if (tables.isEmpty) throw Exception(_pasUneSauvegarde);
+      if (await sauvegarde.getVersion() > AppConstants.dbVersion) {
+        throw Exception('Cette sauvegarde vient d\'une version plus recente de l\'application : '
+            'mettez l\'application a jour avant de la restaurer.');
+      }
+    } on DatabaseException {
+      throw Exception(_pasUneSauvegarde);
+    } finally {
+      await sauvegarde?.close();
+    }
   }
 
   static String _deuxChiffres(int n) => n.toString().padLeft(2, '0');

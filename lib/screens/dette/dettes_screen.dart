@@ -42,16 +42,17 @@ class _DettesScreenState extends State<DettesScreen> {
     setState(() => _chargement = true);
     final dettes = await _db.listerDettes();
     final params = await _db.obtenirParametres();
-    _soldes.clear();
-    _devises.clear();
-    for (final d in dettes) {
-      if (d.id == null) continue;
-      _soldes[d.id!] = await _db.soldeDette(d.id!);
-      _devises[d.id!] = await _db.deviseEffectiveDette(d);
-    }
+    final soldes = await _db.soldesDettes();
+    final devises = await _db.devisesEffectivesDettes(dettes);
     if (!mounted) return;
     setState(() {
       _dettes = dettes;
+      _soldes
+        ..clear()
+        ..addAll(soldes);
+      _devises
+        ..clear()
+        ..addAll(devises);
       _deviseParDefaut = params.deviseSymbole;
       _chargement = false;
     });
@@ -59,17 +60,7 @@ class _DettesScreenState extends State<DettesScreen> {
 
   /// Totaux en cours groupes par devise (voir [_devises]) : additionner des
   /// dettes dans des devises differentes n'aurait aucun sens.
-  Map<String, double> get _totauxParDevise {
-    final totaux = <String, double>{};
-    for (final d in _dettes) {
-      if (d.id == null) continue;
-      final solde = _soldes[d.id!] ?? 0;
-      if (solde <= 0) continue;
-      final devise = _devises[d.id!] ?? _deviseParDefaut;
-      totaux[devise] = (totaux[devise] ?? 0) + solde;
-    }
-    return totaux;
-  }
+  Map<String, double> get _totauxParDevise => DatabaseService.totauxEnCoursParDevise(_soldes, _devises);
 
   Future<void> _exporter() async {
     setState(() => _exportEnCours = true);

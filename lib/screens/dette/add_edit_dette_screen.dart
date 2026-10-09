@@ -7,6 +7,8 @@ import '../../models/categorie_entite.dart';
 import '../../models/dette.dart';
 import '../../models/moto.dart';
 import '../../services/database_service.dart';
+import '../../utils/formatters.dart';
+import '../../widgets/champ_devise.dart';
 
 /// Creation ou modification d'une dette. Le lien optionnel (aucun / une
 /// moto / une entite de categorie) peut etre pre-rempli et fige quand
@@ -87,6 +89,15 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
     _charger();
   }
 
+  @override
+  void dispose() {
+    _nomCtrl.dispose();
+    _montantCtrl.dispose();
+    _notesCtrl.dispose();
+    _deviseCtrl.dispose();
+    super.dispose();
+  }
+
   Future<void> _charger() async {
     final motos = await _db.listerMotos();
     final categories = await _db.listerCategoriesActivite();
@@ -138,17 +149,13 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
     }
 
     // Devise du lien deja connu au chargement (lien fige depuis une fiche
-    // moto/entite, ou dette existante deja liee) : resolue directement via
-    // _lienId, disponible dans les deux cas (contrairement a
-    // _categorieChoisieId, rempli seulement en mode edition ci-dessus).
-    if (_lienType == AppConstants.detteLienMoto && _lienId != null) {
-      setState(() => _deviseLien = params.deviseSymbole);
-    } else if (_lienType == AppConstants.detteLienCategorieEntite && _lienId != null) {
-      final entite = await _db.obtenirEntiteCategorie(_lienId!);
-      if (entite != null) {
-        final categorie = categories.where((c) => c.id == entite.categorieId).toList();
-        if (categorie.isNotEmpty && mounted) setState(() => _deviseLien = categorie.first.deviseSymbole);
-      }
+    // moto/entite, ou dette existante deja liee) : meme regle que partout
+    // ailleurs, plutot qu'un second calcul a garder synchronise.
+    if (_lienType != null && _lienId != null) {
+      final devise = await _db.deviseEffectiveDette(
+        Dette(nomPersonne: '', montantInitial: 0, date: _date, lienType: _lienType, lienId: _lienId),
+      );
+      if (mounted) setState(() => _deviseLien = devise);
     }
   }
 
@@ -180,7 +187,7 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
       final dette = Dette(
         id: widget.detteExistante?.id,
         nomPersonne: _nomCtrl.text.trim(),
-        montantInitial: double.parse(_montantCtrl.text.replaceAll(' ', '')),
+        montantInitial: lireMontant(_montantCtrl.text)!,
         date: _date,
         notes: _notesCtrl.text.trim().isEmpty ? null : _notesCtrl.text.trim(),
         dateCreation: widget.detteExistante?.dateCreation,
@@ -188,7 +195,9 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
         lienId: _lienId,
         // Sans effet des qu'un lien est actif (la devise vient alors de la
         // moto/entite liee) : n'a d'importance que pour une dette independante.
-        deviseSymbole: _deviseCtrl.text.trim().isEmpty ? null : _deviseCtrl.text.trim(),
+        // Normalisee ("fg " -> "FG") : sinon "FG" et "fg" donnaient deux
+        // totaux separes dans les totaux par devise.
+        deviseSymbole: normaliserDevise(_deviseCtrl.text),
       );
 
       if (_modeEdition) {
@@ -229,9 +238,8 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
                     TextFormField(
                       controller: _montantCtrl,
                       decoration: InputDecoration(labelText: 'Montant prete (${_deviseEffectiveAffichee()})'),
-                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                      validator: (v) =>
-                          (double.tryParse((v ?? '').replaceAll(' ', '')) == null) ? 'Montant invalide' : null,
+                      keyboardType: TextInputType.number,
+                      validator: (v) => lireMontant(v) == null ? 'Montant invalide' : null,
                     ),
                     const SizedBox(height: 12),
                     ListTile(
@@ -319,12 +327,10 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
                       ),
                       if (_lienType == null) ...[
                         const SizedBox(height: 10),
-                        TextFormField(
-                          controller: _deviseCtrl,
-                          decoration: const InputDecoration(
-                            labelText: 'Devise',
-                            helperText: 'Ex: FG, FCFA, GNF — propre a cette dette independante',
-                          ),
+                        // Propre a cette dette independante (une dette liee prend la devise du lien).
+                        ChampDevise(
+                          valeur: _deviseCtrl.text,
+                          onChanged: (d) => setState(() => _deviseCtrl.text = d),
                         ),
                       ],
                       if (_lienType == AppConstants.detteLienMoto) ...[

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:sqflite/sqflite.dart' show DatabaseException;
 
 import '../core/constants.dart';
 import '../core/theme.dart';
@@ -35,6 +36,9 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
     setState(() => _chargement = true);
     final motos = await _db.listerMotos();
     final depenses = await _db.listerDepensesRecentes(motoId: _filtreMotoId, limite: 200);
+    // Total calcule en base : la liste n'affiche que les 200 dernieres
+    // depenses, les additionner donnait un total faux au-dela.
+    final total = await _db.totalDepenses(motoId: _filtreMotoId);
     final categories = await _db.listerCategories();
     final params = await _db.obtenirParametres();
 
@@ -42,6 +46,7 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
     setState(() {
       _motos = motos;
       _depenses = depenses;
+      _totalAffiche = total;
       _categories = {for (final c in categories) c.id: c};
       _motosParId = {for (final m in motos) m.id: m};
       _devise = params.deviseSymbole;
@@ -49,7 +54,7 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
     });
   }
 
-  double get _totalAffiche => _depenses.fold(0, (s, d) => s + d.montant);
+  double _totalAffiche = 0;
 
   @override
   Widget build(BuildContext context) {
@@ -247,14 +252,15 @@ class _CategoriesScreenState extends State<_CategoriesScreen> {
       try {
         await _db.insererCategorie(CategorieDepense(nom: nom, icone: 'dots'));
         _charger();
-      } catch (e) {
+      } on DatabaseException catch (e) {
         // "nom" est UNIQUE en base : une categorie du meme nom (casse
-        // exacte) existe deja. Sans ce catch, l'exception SQLite remonte
-        // non geree et l'ajout echoue silencieusement, sans que
-        // l'utilisateur comprenne pourquoi.
+        // exacte) existe deja. Les autres erreurs (base verrouillee...) ne
+        // doivent pas etre presentees comme un doublon.
         if (mounted) {
-          ScaffoldMessenger.of(context)
-              .showSnackBar(SnackBar(content: Text('Une categorie "$nom" existe deja.')));
+          final message = e.isUniqueConstraintError()
+              ? 'Une categorie "$nom" existe deja.'
+              : 'Erreur lors de l\'ajout : $e';
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
         }
       }
     }

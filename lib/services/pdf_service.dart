@@ -6,12 +6,21 @@ import '../core/constants.dart';
 import '../models/moto.dart';
 import '../models/versement.dart';
 import '../models/depense.dart';
+import 'schedule_service.dart';
 
 /// Génère les relevés PDF (par moto, ou rapport général toutes motos) et
 /// propose le partage/l'impression natif du téléphone. Aucune notion de
 /// dette : uniquement le suivi des versements reçus et des dépenses.
 class PdfService {
   PdfService._();
+
+  /// Meme regle que DatabaseService.soldeNet : due le lendemain de son
+  /// echeance, sauf passee en dette (suivie dans Dettes) ou tombee pendant
+  /// la pause d'une moto suspendue (restee "en attente").
+  static bool _estDue(Versement v, Moto moto, DateTime aujourdHui) =>
+      v.dateEcheance.isBefore(aujourdHui) &&
+      v.statut != AppConstants.versementEnDette &&
+      (moto.statut == AppConstants.motoActive || v.statut != AppConstants.versementEnAttente);
 
   static Future<void> genererEtPartagerReleve({
     required Moto moto,
@@ -28,9 +37,11 @@ class PdfService {
     // pour toutes les echeances deja passees (paiements partiels et
     // versements superieurs au montant prevu sont donc bien pris en compte,
     // contrairement a une simple somme des echeances au statut "en_retard").
-    final aujourdHui = DateTime.now();
+    // Due a partir du lendemain de son echeance, comme dans l'app (soldeNet).
+    final aujourdHui = ScheduleService.aujourdHui();
+    // Une echeance passee en dette est suivie dans Dettes (pas comptee deux fois).
     final totalDu = versements
-        .where((v) => !v.dateEcheance.isAfter(aujourdHui))
+        .where((v) => _estDue(v, moto, aujourdHui))
         .fold<double>(0, (s, v) => s + v.montantPrevu);
     final solde = totalVerse - totalDu;
     final totalDepenses = depenses.fold<double>(0, (s, d) => s + d.montant);
@@ -115,7 +126,7 @@ class PdfService {
     double totalGeneralRetard = 0;
     double totalGeneralAvance = 0;
     double totalGeneralDepenses = 0;
-    final aujourdHui = DateTime.now();
+    final aujourdHui = ScheduleService.aujourdHui();
 
     final lignes = motos.map((m) {
       final versements = m.id != null ? (versementsParMoto[m.id] ?? []) : <Versement>[];
@@ -127,7 +138,7 @@ class PdfService {
       // somme des echeances au statut "en_retard", car il tient compte des
       // paiements partiels et des versements superieurs au montant prevu.
       final du = versements
-          .where((v) => !v.dateEcheance.isAfter(aujourdHui))
+          .where((v) => _estDue(v, m, aujourdHui))
           .fold<double>(0, (s, v) => s + v.montantPrevu);
       final solde = verse - du;
       final retard = solde < 0 ? -solde : 0.0;

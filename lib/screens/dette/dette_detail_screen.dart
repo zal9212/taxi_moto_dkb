@@ -128,9 +128,14 @@ class _DetteDetailScreenState extends State<DetteDetailScreen> {
                   controller: montantCtrl,
                   autofocus: true,
                   decoration: InputDecoration(labelText: 'Montant ($_devise)'),
-                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                  validator: (v) =>
-                      (double.tryParse((v ?? '').replaceAll(' ', '')) == null) ? 'Montant invalide' : null,
+                  keyboardType: TextInputType.number,
+                  validator: (v) {
+                    final montant = lireMontant(v);
+                    if (montant == null) return 'Montant invalide';
+                    // Sinon le surplus disparaissait derriere "Soldee".
+                    if (montant > _solde) return 'Plus que le reste du (${formaterMontant(_solde, _devise)})';
+                    return null;
+                  },
                 ),
                 const SizedBox(height: 8),
                 ListTile(
@@ -167,7 +172,7 @@ class _DetteDetailScreenState extends State<DetteDetailScreen> {
     if (confirme != true) return;
     await _db.insererRemboursement(DetteRemboursement(
       detteId: widget.detteId,
-      montant: double.parse(montantCtrl.text.replaceAll(' ', '')),
+      montant: lireMontant(montantCtrl.text)!,
       date: date,
     ));
     _charger();
@@ -263,7 +268,8 @@ class _DetteDetailScreenState extends State<DetteDetailScreen> {
             if (dette.lienType != null && dette.lienId != null) ...[
               const SizedBox(height: 12),
               InkWell(
-                onTap: _ouvrirLien,
+                // Rien a ouvrir quand la moto/entite n'existe plus.
+                onTap: _lienSupprime ? null : _ouvrirLien,
                 child: Container(
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
@@ -293,7 +299,7 @@ class _DetteDetailScreenState extends State<DetteDetailScreen> {
                           ),
                         ),
                       ),
-                      Icon(Icons.chevron_right, size: 18, color: _lienSupprime ? AppColors.danger : AppColors.texteGris),
+                      if (!_lienSupprime) const Icon(Icons.chevron_right, size: 18, color: AppColors.texteGris),
                     ],
                   ),
                 ),

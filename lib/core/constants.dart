@@ -7,7 +7,7 @@ class AppConstants {
   AppConstants._();
 
   static const String dbName = 'moto_taxi_douka.db';
-  static const int dbVersion = 5;
+  static const int dbVersion = 8;
 
   // Valeurs par défaut au premier lancement (modifiables ensuite)
   static const String devisePardDefaut = 'FG';
@@ -28,6 +28,9 @@ class AppConstants {
   static const String versementEnAttente = 'en_attente';
   static const String versementPaye = 'paye';
   static const String versementEnRetard = 'en_retard';
+  /// Échéance non payée "marquée en dette" : suivie dans Dettes (dette liée
+  /// à la moto, voir Versement.detteId), elle ne compte plus dans le retard.
+  static const String versementEnDette = 'en_dette';
 
   // Catégories de dépenses par défaut (extensibles par l'utilisateur)
   static const List<Map<String, String>> categoriesParDefaut = [
@@ -52,6 +55,10 @@ class AppConstants {
   // Type d'une transaction generique (revenu/depense d'une entite)
   static const String transactionRevenu = 'revenu';
   static const String transactionDepense = 'depense';
+
+  /// Nom affiche (et colonne "Personne" en Excel) du compte du proprietaire
+  /// d'une entite, face a ses gerants.
+  static const String libelleProprietaire = 'Proprietaire';
 
   // Palette de couleurs proposee a la creation d'une categorie
   static const List<String> couleursCategorieDisponibles = [

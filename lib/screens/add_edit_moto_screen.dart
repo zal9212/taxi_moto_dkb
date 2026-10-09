@@ -5,6 +5,8 @@ import '../core/theme.dart';
 import '../models/moto.dart';
 import '../services/database_service.dart';
 import '../services/notification_service.dart';
+import '../services/schedule_service.dart';
+import '../utils/formatters.dart';
 
 /// Formulaire de création/édition d'une moto. Rien n'est en liste fermée :
 /// la fréquence propose 3 modes (hebdomadaire / mensuelle / personnalisée)
@@ -32,7 +34,11 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
   int _jourSemaine = DateTime.monday;
   int _jourMois = 1;
   int _intervalleJours = 7;
-  DateTime _dateDebut = DateTime.now();
+  /// Date du 1er versement (sans l'heure).
+  DateTime _dateDebut = ScheduleService.aujourdHui();
+  /// En creation, tant que la date n'est pas choisie a la main, elle suit
+  /// la frequence (voir [_majDateParDefaut]).
+  bool _dateDebutChoisie = false;
   String _statut = AppConstants.motoActive;
 
   bool get _modeEdition => widget.motoExistante != null;
@@ -47,9 +53,12 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
     _montantVersementCtrl = TextEditingController(text: m?.montantVersement.toStringAsFixed(0) ?? '');
     _notesCtrl = TextEditingController(text: m?.notes ?? '');
 
-    if (m != null) {
+    if (m == null) {
+      _majDateParDefaut();
+    } else {
       _frequenceType = m.frequenceType;
-      _dateDebut = m.dateDebut;
+      _dateDebut = ScheduleService.dateSeule(m.dateDebut);
+      _dateDebutChoisie = true;
       _statut = m.statut;
       switch (m.frequenceType) {
         case AppConstants.freqHebdomadaire:
@@ -78,12 +87,24 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
     }
   }
 
+  /// En creation, propose comme 1er versement le prochain jour qui respecte
+  /// la frequence (ex: le prochain lundi) tant que l'utilisateur n'a pas
+  /// choisi une date lui-meme.
+  void _majDateParDefaut() {
+    if (_dateDebutChoisie) return;
+    _dateDebut = ScheduleService.premiereEcheance(
+      dateDebut: ScheduleService.aujourdHui(),
+      type: _frequenceType,
+      valeur: _frequenceValeur,
+    );
+  }
+
   Future<void> _enregistrer() async {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _enregistrement = true);
 
     try {
-      final montantVersement = double.parse(_montantVersementCtrl.text.replaceAll(' ', ''));
+      final montantVersement = lireMontant(_montantVersementCtrl.text)!;
 
       final moto = Moto(
         id: widget.motoExistante?.id,
@@ -105,17 +126,53 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
         await _planifierNotifications(motoAvecId);
       } else {
         final ancien = widget.motoExistante!;
-        final changementPlan = ancien.montantVersement != montantVersement ||
+        final dateDebutChangee = !DateUtils.isSameDay(ancien.dateDebut, _dateDebut);
+        final planChange = dateDebutChangee ||
+            ancien.montantVersement != montantVersement ||
             ancien.frequenceType != _frequenceType ||
-            ancien.frequenceValeur != _frequenceValeur ||
-            ancien.dateDebut != _dateDebut;
+            ancien.frequenceValeur != _frequenceValeur;
+        final active = _statut == AppConstants.motoActive;
+        final reactivee = active && ancien.statut != AppConstants.motoActive;
+        // Une moto suspendue/archivee garde ses echeances telles quelles :
+        // elles sont recalculees a sa reactivation. Une reactivation sans
+        // nouvelle date de debut suit la meme regle que "Reactiver" depuis
+        // la fiche moto.
+        final replanifier = active && planChange && (dateDebutChangee || !reactivee);
+
+        if (replanifier) {
+          final String message;
+          if (dateDebutChangee) {
+            // Apercu exact de ce qui sera ajoute (meme calcul que l'enregistrement).
+            final plan = ScheduleService.replanifier(
+              existants: await _db.listerVersementsParMoto(moto.id!),
+              moto: moto,
+              depuisDateDebut: true,
+              aujourdHui: ScheduleService.aujourdHui(),
+            );
+            final passees = plan.aCreer.where((d) => d.isBefore(ScheduleService.aujourdHui())).toList();
+            message = '${passees.isEmpty ? '' : '${passees.length} echeance(s) passee(s) seront ajoutee(s) en retard : '
+                '${passees.map(formaterDate).join(', ')}.\n\n'}'
+                'Les echeances a venir suivront la frequence a partir du ${formaterDate(_dateDebut)}. '
+                'Aucun versement paye, retard ou dette ne sera supprime.';
+          } else {
+            message = 'Le changement prendra effet au prochain versement prevu. Les versements '
+                'deja payes, les retards et les dettes ne changent pas.';
+          }
+          if (!mounted) return;
+          final confirme = await _confirmerReplanification(message);
+          if (!confirme) {
+            if (mounted) setState(() => _enregistrement = false);
+            return;
+          }
+        }
 
         await _db.modifierMoto(moto);
-
-        if (changementPlan && mounted) {
-          final confirme = await _confirmerRegeneration();
-          if (confirme == true) {
-            await _regenererEcheancesNonPayees(moto);
+        if (replanifier || reactivee) {
+          await _annulerRappelsNonPayes(moto.id!);
+          if (replanifier) {
+            await _db.replanifierEcheances(moto, depuisDateDebut: dateDebutChangee);
+          } else {
+            await _db.redemarrerEcheancesApresReactivation(moto);
           }
         }
         await _planifierNotifications(moto);
@@ -132,38 +189,34 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
     }
   }
 
-  Future<bool?> _confirmerRegeneration() {
-    return showDialog<bool>(
+  /// Plus de choix "garder les echeances telles quelles" : c'est ce qui
+  /// laissait la moto sur l'ancien jour (ex: toujours le lundi apres un
+  /// passage au mercredi). Annuler ne modifie rien.
+  Future<bool> _confirmerReplanification(String message) async {
+    final confirme = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Mettre a jour les echeances ?'),
-        content: const Text(
-            'Le montant ou la frequence a change. Les versements deja payes '
-            'sont conserves. Voulez-vous regenerer les echeances a venir selon '
-            'les nouveaux parametres ?'),
+        content: Text(message),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Non, garder telles quelles')),
-          ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('Oui, regenerer')),
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Annuler')),
+          ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('Confirmer')),
         ],
       ),
     );
+    return confirme == true;
   }
 
-  Future<void> _regenererEcheancesNonPayees(Moto moto) async {
-    if (moto.id == null) return;
-    final tousLesVersements = await _db.listerVersementsParMoto(moto.id!);
-    final nonPayes = tousLesVersements.where((v) => v.statut != AppConstants.versementPaye).toList();
-
-    for (final v in nonPayes) {
-      if (v.id != null) {
+  /// Annule les rappels des echeances non payees, qui vont etre recalculees.
+  Future<void> _annulerRappelsNonPayes(int motoId) async {
+    for (final v in await _db.listerVersementsParMoto(motoId)) {
+      if (v.statut == AppConstants.versementPaye || v.id == null) continue;
+      // Secondaire : un echec du plugin ne doit pas empecher la mise a jour
+      // des echeances (meme principe que la suppression d'une moto).
+      try {
         await NotificationService.annulerRappel(v.id!);
-      }
+      } catch (_) {}
     }
-    final db = await _db.database;
-    await db.delete('versements',
-        where: 'moto_id = ? AND statut != ?', whereArgs: [moto.id, AppConstants.versementPaye]);
-
-    await _db.assurerEcheances(moto);
   }
 
   Future<void> _planifierNotifications(Moto moto) async {
@@ -203,7 +256,7 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
                 controller: _montantVersementCtrl,
                 decoration: const InputDecoration(labelText: 'Montant par versement'),
                 keyboardType: TextInputType.number,
-                validator: (v) => (double.tryParse(v ?? '') == null) ? 'Montant invalide' : null,
+                validator: (v) => lireMontant(v) == null ? 'Montant invalide' : null,
               ),
               const SizedBox(height: 20),
               const Text('Frequence de versement', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
@@ -214,7 +267,7 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
               const SizedBox(height: 20),
               ListTile(
                 contentPadding: EdgeInsets.zero,
-                title: const Text('Date de debut', style: TextStyle(fontSize: 13)),
+                title: const Text('Date de debut (1er versement)', style: TextStyle(fontSize: 13)),
                 subtitle: Text('${_dateDebut.day}/${_dateDebut.month}/${_dateDebut.year}'),
                 trailing: const Icon(Icons.calendar_today_outlined, size: 18),
                 onTap: () async {
@@ -224,7 +277,12 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
                     firstDate: DateTime(2020),
                     lastDate: DateTime(2100),
                   );
-                  if (choisie != null) setState(() => _dateDebut = choisie);
+                  if (choisie != null) {
+                    setState(() {
+                      _dateDebut = ScheduleService.dateSeule(choisie);
+                      _dateDebutChoisie = true;
+                    });
+                  }
                 },
               ),
               const Divider(),
@@ -265,7 +323,10 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
       final actif = _frequenceType == valeur;
       return Expanded(
         child: GestureDetector(
-          onTap: () => setState(() => _frequenceType = valeur),
+          onTap: () => setState(() {
+            _frequenceType = valeur;
+            _majDateParDefaut();
+          }),
           child: Container(
             margin: const EdgeInsets.only(right: 6),
             padding: const EdgeInsets.symmetric(vertical: 10),
@@ -301,14 +362,20 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
             7,
             (i) => DropdownMenuItem(value: i + 1, child: Text(AppConstants.joursSemaine[i])),
           ),
-          onChanged: (v) => setState(() => _jourSemaine = v!),
+          onChanged: (v) => setState(() {
+            _jourSemaine = v!;
+            _majDateParDefaut();
+          }),
         );
       case AppConstants.freqMensuelle:
         return DropdownButtonFormField<int>(
           initialValue: _jourMois,
           decoration: const InputDecoration(labelText: 'Jour du mois'),
           items: List.generate(31, (i) => DropdownMenuItem(value: i + 1, child: Text('${i + 1}'))),
-          onChanged: (v) => setState(() => _jourMois = v!),
+          onChanged: (v) => setState(() {
+            _jourMois = v!;
+            _majDateParDefaut();
+          }),
         );
       case AppConstants.freqPersonnalisee:
       default:
@@ -316,6 +383,8 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
           initialValue: _intervalleJours.toString(),
           decoration: const InputDecoration(labelText: 'Intervalle en jours (ex: tous les 10 jours)'),
           keyboardType: TextInputType.number,
+          // Au moins 1 jour : 0 ou un nombre negatif casserait la suite des echeances.
+          validator: (v) => (int.tryParse(v ?? '') ?? 0) < 1 ? 'Au moins 1 jour' : null,
           onChanged: (v) => _intervalleJours = int.tryParse(v) ?? _intervalleJours,
         );
     }

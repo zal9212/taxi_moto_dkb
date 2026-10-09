@@ -130,7 +130,8 @@ class _StatsScreenState extends State<StatsScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Total verse sur la periode', style: TextStyle(color: AppColors.texteGris, fontSize: 11)),
+                    // Meme caisse que l'accueil : versements + remboursements de dettes liees.
+                    Text('Total encaisse sur la periode', style: TextStyle(color: AppColors.texteGris, fontSize: 11)),
                     const SizedBox(height: 4),
                     Text(formaterMontant(_total, _devise),
                         style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w600)),

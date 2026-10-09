@@ -10,6 +10,10 @@ class CategorieTransaction {
   final DateTime date;
   final String? description;
 
+  /// Personne qui a fait l'operation : un gerant de l'entite, ou null pour
+  /// le proprietaire.
+  final int? gerantId;
+
   CategorieTransaction({
     this.id,
     required this.entiteId,
@@ -17,6 +21,7 @@ class CategorieTransaction {
     required this.montant,
     required this.date,
     this.description,
+    this.gerantId,
   });
 
   Map<String, dynamic> toMap() {
@@ -27,6 +32,7 @@ class CategorieTransaction {
       'montant': montant,
       'date': date.toIso8601String(),
       'description': description,
+      'gerant_id': gerantId,
     };
   }
 
@@ -38,6 +44,7 @@ class CategorieTransaction {
       montant: (map['montant'] as num).toDouble(),
       date: DateTime.parse(map['date'] as String),
       description: map['description'] as String?,
+      gerantId: map['gerant_id'] as int?,
     );
   }
 }

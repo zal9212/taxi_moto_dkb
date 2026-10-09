@@ -5,6 +5,8 @@ import '../../core/theme.dart';
 import '../../models/categorie_activite.dart';
 import '../../services/database_service.dart';
 import '../../utils/couleur_utils.dart';
+import '../../utils/formatters.dart';
+import '../../widgets/champ_devise.dart';
 
 /// Creation ou modification d'une categorie d'activite (ex: Boutiques) :
 /// nom, devise propre (jamais melangee avec une autre categorie), et
@@ -45,7 +47,8 @@ class _CreerModifierCategorieScreenState extends State<CreerModifierCategorieScr
         id: widget.categorieExistante?.id,
         nom: _nomCtrl.text.trim(),
         couleur: _couleur,
-        deviseSymbole: _deviseCtrl.text.trim(),
+        // Champ requis (voir validator) : jamais null ici.
+        deviseSymbole: normaliserDevise(_deviseCtrl.text)!,
         dateCreation: widget.categorieExistante?.dateCreation,
       );
 
@@ -84,10 +87,9 @@ class _CreerModifierCategorieScreenState extends State<CreerModifierCategorieScr
                 validator: (v) => (v == null || v.trim().isEmpty) ? 'Champ requis' : null,
               ),
               const SizedBox(height: 12),
-              TextFormField(
-                controller: _deviseCtrl,
-                decoration: const InputDecoration(labelText: 'Devise (ex: FCFA, XOF, EUR)'),
-                validator: (v) => (v == null || v.trim().isEmpty) ? 'Champ requis' : null,
+              ChampDevise(
+                valeur: _deviseCtrl.text,
+                onChanged: (d) => setState(() => _deviseCtrl.text = d),
               ),
               const SizedBox(height: 16),
               const Text('Couleur', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
