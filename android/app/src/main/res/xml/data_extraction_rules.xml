@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+ : sauvegarde automatique Google Drive de la base SQLite
+     uniquement. Le stockage securise (PIN, dans shared_prefs) est exclu :
+     ses cles Keystore ne suivent pas sur un autre telephone, le restaurer
+     ferait planter l'app. Apres restauration, l'utilisateur redefinit son PIN. -->
+<data-extraction-rules>
+    <!-- Refuse la sauvegarde si elle ne peut pas etre chiffree par le verrouillage
+         d'ecran du telephone (Google ne peut alors pas lire la base). -->
+    <cloud-backup disableIfNoEncryptionCapabilities="true">
+        <include domain="database" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <include domain="database" path="." />
+    </device-transfer>
+</data-extraction-rules>
