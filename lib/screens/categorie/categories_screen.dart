@@ -73,7 +73,8 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
         title: const Text('Supprimer cette categorie ?'),
         content: Text(
           '"${c.nom}" et tout son contenu (entites, revenus, depenses) '
-          'seront definitivement supprimes. Cette action est irreversible.',
+          'seront definitivement supprimes. Cette action est irreversible. '
+          'Les dettes liees a ses entites seront conservees, mais detachees.',
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Annuler')),

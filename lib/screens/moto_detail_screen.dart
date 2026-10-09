@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../core/constants.dart';
 import '../core/theme.dart';
@@ -10,6 +11,7 @@ import '../services/notification_service.dart';
 import '../services/pdf_service.dart';
 import '../services/schedule_service.dart';
 import '../utils/formatters.dart';
+import '../utils/messages.dart';
 import 'add_edit_moto_screen.dart';
 import 'dette/add_edit_dette_screen.dart';
 import 'dette/dette_detail_screen.dart';
@@ -27,6 +29,8 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
   Moto? _moto;
   List<Versement> _versements = [];
   double _totalVerse = 0;
+  /// Part de la caisse venant des remboursements de dettes liees a la moto.
+  double _remboursementsDettes = 0;
   /// Solde net : negatif = retard (dette), positif = avance (credit).
   double _solde = 0;
   String _devise = AppConstants.devisePardDefaut;
@@ -54,11 +58,12 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     // Maintient la fenetre d'echeances a venir pleine (versement recurrent
     // et indefini, pas de montant total a atteindre).
     if (moto.statut == AppConstants.motoActive) {
-      await _db.assurerEcheances(moto);
+      await NotificationService.assurerEcheancesEtRappels(moto);
     }
 
     final versements = await _db.listerVersementsParMoto(widget.motoId);
     final totalVerse = await _db.totalEncaisse(motoId: widget.motoId);
+    final remboursementsDettes = await _db.totalRemboursementsMotos(motoId: widget.motoId);
     final solde = await _db.soldeNet(motoId: widget.motoId);
     final params = await _db.obtenirParametres();
     final dettes = await _db.listerDettesParLien(AppConstants.detteLienMoto, widget.motoId);
@@ -72,6 +77,7 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
       _moto = moto;
       _versements = versements;
       _totalVerse = totalVerse;
+      _remboursementsDettes = remboursementsDettes;
       _solde = solde;
       _devise = params.deviseSymbole;
       _dettes = dettes;
@@ -79,13 +85,6 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     });
   }
 
-  Versement? get _prochain {
-    final enAttente = _versements
-        .where((v) => v.statut != AppConstants.versementPaye)
-        .toList()
-      ..sort((a, b) => a.dateEcheance.compareTo(b.dateEcheance));
-    return enAttente.isNotEmpty ? enAttente.first : null;
-  }
 
   Future<void> _validerVersement(Versement v) async {
     final controleur = TextEditingController(text: v.montantPrevu.toStringAsFixed(0));
@@ -118,11 +117,167 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     );
 
     if (confirme != true) return;
-    final montant = double.tryParse(controleur.text) ?? v.montantPrevu;
+    // Avant, un montant mal lu ("10 000") enregistrait le montant prevu sans rien dire.
+    final montant = lireMontant(controleur.text);
+    if (montant == null) {
+      _signalerMontantInvalide();
+      return;
+    }
     await _db.validerVersement(v.id!, montantPaye: montant);
     if (v.id != null) await NotificationService.annulerRappel(v.id!);
-    if (_moto != null) await _db.assurerEcheances(_moto!);
+    // _charger() complete les echeances (et leurs rappels) si la moto est active.
     _charger();
+  }
+
+  /// Echeance non payee -> vraie dette liee a la moto (ecran Dettes). Elle ne
+  /// compte plus dans le retard ; ses remboursements vont dans la caisse.
+  Future<void> _marquerEnDette(Versement v) async {
+    if (_moto == null || v.id == null) return;
+    final confirme = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Marquer en dette ?'),
+        content: Text(
+          'Le versement du ${formaterDate(v.dateEcheance)} '
+          '(${formaterMontant(v.montantPrevu - (v.montantPaye ?? 0), _devise)}) sera suivi dans Dettes, '
+          'lie a cette moto, et ne comptera plus dans le retard. Quand le chauffeur paiera, ajoutez '
+          'un remboursement : l\'argent ira dans la caisse de la moto et l\'echeance affichera « Rembourse ».',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Annuler')),
+          ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('Marquer en dette')),
+        ],
+      ),
+    );
+    if (confirme != true) return;
+    await _db.marquerEnDette(v, _moto!);
+    _charger();
+  }
+
+  List<({DateTime date, String etat, double reste})> _periodesAPayer() => ScheduleService.periodesAPayer(
+        existants: _versements,
+        moto: _moto!,
+        aujourdHui: ScheduleService.aujourdHui(),
+      );
+
+  /// Periodes deja passees et pas soldees (ce que le chauffeur doit).
+  List<({DateTime date, String etat, double reste})> _periodesDues() =>
+      _periodesAPayer().where((p) => p.date.isBefore(ScheduleService.aujourdHui())).toList();
+
+  /// "Encaisser un versement" : le chauffeur donne de l'argent, on tape le
+  /// montant recu. Il est reparti tout seul sur les periodes dues, la plus
+  /// ancienne d'abord (apercu en direct), puis on peut envoyer le recu.
+  Future<void> _encaisserVersement() async {
+    final moto = _moto;
+    if (moto == null) return;
+    final periodes = _periodesAPayer();
+    if (periodes.isEmpty) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Aucune periode a payer pour le moment.')));
+      return;
+    }
+    final montantCtrl = TextEditingController(text: periodes.first.reste.toStringAsFixed(0));
+
+    final confirme = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setStateDialog) {
+          final saisi = lireMontant(montantCtrl.text);
+          final apercu = saisi == null ? null : ScheduleService.repartirPaiement(periodes, saisi);
+          return AlertDialog(
+            title: const Text('Encaisser un versement'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TextField(
+                  controller: montantCtrl,
+                  autofocus: true,
+                  keyboardType: TextInputType.number,
+                  decoration: InputDecoration(labelText: 'Montant recu ($_devise)'),
+                  onChanged: (_) => setStateDialog(() {}),
+                ),
+                const SizedBox(height: 12),
+                const Text('Reparti sur (le plus ancien d\'abord) :',
+                    style: TextStyle(color: AppColors.texteGris, fontSize: 11)),
+                const SizedBox(height: 4),
+                if (apercu == null)
+                  const Text('Montant invalide', style: TextStyle(color: AppColors.danger, fontSize: 12))
+                else
+                  for (final a in apercu)
+                    Text(
+                      '${formaterDate(a.date)} : ${formaterMontant(a.montant, _devise)}'
+                      '${_libelleApresPaiement(periodes, a)}',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+              ],
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Annuler')),
+              ElevatedButton(
+                onPressed: apercu == null ? null : () => Navigator.pop(context, true),
+                child: const Text('Encaisser'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+
+    if (confirme != true) return;
+    final montant = lireMontant(montantCtrl.text);
+    if (montant == null) {
+      _signalerMontantInvalide();
+      return;
+    }
+    final affectations = await _db.encaisser(moto, montant);
+    // Les rappels des periodes soldees n'ont plus lieu d'etre.
+    for (final v in _versements) {
+      if (v.id != null && affectations.any((a) => a.date == ScheduleService.dateSeule(v.dateEcheance))) {
+        await NotificationService.annulerRappel(v.id!);
+      }
+    }
+    await _charger();
+    if (!mounted) return;
+    final resteDu = _periodesDues().fold<double>(0, (t, p) => t + p.reste);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text('${formaterMontant(montant, _devise)} encaisses.'),
+      action: SnackBarAction(
+        label: 'Envoyer le recu',
+        onPressed: () => Share.share(messageRecu(
+          chauffeur: moto.chauffeur,
+          moto: moto.nom,
+          montant: montant,
+          date: DateTime.now(),
+          affectations: affectations,
+          resteDu: resteDu,
+          devise: _devise,
+        )),
+      ),
+    ));
+  }
+
+  /// " (solde)" ou " (partiel, reste X)" pour l'apercu de repartition.
+  String _libelleApresPaiement(
+      List<({DateTime date, String etat, double reste})> periodes, ({DateTime date, double montant}) a) {
+    final p = periodes.firstWhere((p) => p.date == a.date);
+    if (a.montant > p.reste) return ' (solde + avance)';
+    if (a.montant == p.reste) return ' (solde)';
+    return ' (partiel, reste ${formaterMontant(p.reste - a.montant, _devise)})';
+  }
+
+  /// Message de relance pret a envoyer (WhatsApp, SMS...) au chauffeur.
+  void _relancerChauffeur() {
+    final dues = _periodesDues();
+    if (_moto == null || dues.isEmpty) return;
+    Share.share(messageRelance(chauffeur: _moto!.chauffeur, moto: _moto!.nom, dues: dues, devise: _devise));
+  }
+
+  void _signalerMontantInvalide() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Montant invalide : rien n\'a ete enregistre.')),
+    );
   }
 
   Future<void> _exporterPdf() async {
@@ -153,9 +308,9 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
               'Aucune nouvelle echeance ne sera generee et les rappels de '
               'notification seront arretes tant qu\'elle est suspendue. '
               'L\'historique deja paye est conserve. A la reactivation, les '
-              'echeances encore en attente ne compteront pas comme du retard '
-              '(la moto n\'aura pas travaille pendant la pause) : le suivi '
-              'repartira simplement a partir de la date de reactivation.'),
+              'echeances tombees pendant la pause ne compteront pas (la moto '
+              'n\'aura pas travaille) : le suivi repartira de la date de '
+              'reactivation. Les retards et dettes d\'avant la pause restent dus.'),
           actions: [
             TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Annuler')),
             ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('Suspendre')),
@@ -205,7 +360,8 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
         title: const Text('Supprimer cette moto ?'),
         content: Text(
           '"${_moto!.nom}" et tout son historique (versements, depenses) '
-          'seront definitivement supprimes. Cette action est irreversible.',
+          'seront definitivement supprimes. Cette action est irreversible.'
+          '${_dettes.isEmpty ? '' : '\n\n${_dettes.length} dette(s) liee(s) seront conservee(s), detachee(s) de cette moto.'}',
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Annuler')),
@@ -283,8 +439,11 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     );
 
     if (action == 'enregistrer') {
-      final montant = double.tryParse(controleur.text);
-      if (montant == null) return;
+      final montant = lireMontant(controleur.text);
+      if (montant == null) {
+        _signalerMontantInvalide();
+        return;
+      }
       await _db.modifierMontantPaye(v.id!, montant);
       _charger();
     } else if (action == 'annuler_validation') {
@@ -315,7 +474,6 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     }
 
     final moto = _moto!;
-    final prochain = _prochain;
 
     return Scaffold(
       appBar: AppBar(
@@ -332,6 +490,12 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
           ],
         ),
         actions: [
+          if (_periodesDues().isNotEmpty)
+            IconButton(
+              icon: const Icon(Icons.send_outlined),
+              tooltip: 'Relancer le chauffeur',
+              onPressed: _relancerChauffeur,
+            ),
           IconButton(
             icon: const Icon(Icons.picture_as_pdf_outlined),
             tooltip: 'Exporter le releve',
@@ -382,6 +546,9 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
                   const SizedBox(height: 4),
                   Text(formaterMontant(_totalVerse, _devise),
                       style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w600)),
+                  if (_remboursementsDettes > 0)
+                    Text('dont ${formaterMontant(_remboursementsDettes, _devise)} de remboursements de dettes',
+                        style: const TextStyle(color: AppColors.texteGris, fontSize: 10)),
                   const SizedBox(height: 4),
                   Text(
                     ScheduleService.libelleFrequence(moto.frequenceType, moto.frequenceValeur),
@@ -423,14 +590,14 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
                         ),
                       ),
                     )
-                  else if (prochain != null)
+                  else
+                    // Un seul geste quand le chauffeur donne de l'argent : choisir la periode payee.
                     SizedBox(
                       width: double.infinity,
                       child: ElevatedButton.icon(
-                        onPressed: () => _validerVersement(prochain),
-                        icon: const Icon(Icons.check, size: 16),
-                        label: Text(
-                            'Valider versement (${formaterMontant(prochain.montantPrevu, _devise)})'),
+                        onPressed: _encaisserVersement,
+                        icon: const Icon(Icons.payments_outlined, size: 16),
+                        label: const Text('Encaisser un versement'),
                       ),
                     ),
                 ],
@@ -518,27 +685,49 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
   }
 
   Widget _ligneVersement(Versement v) {
+    final estPaye = v.statut == AppConstants.versementPaye;
+    final estDette = v.statut == AppConstants.versementEnDette;
+    // Une echeance passee en dette se suit dans Dettes : reste du, ou "Rembourse".
+    final resteDette = estDette ? _soldeParDette[v.detteId] : null;
+    final passeeNonPayee = !estPaye && !estDette && v.dateEcheance.isBefore(ScheduleService.aujourdHui());
+
     late Color couleur;
     late String libelle;
-    switch (v.statut) {
-      case AppConstants.versementPaye:
-        couleur = AppColors.succes;
-        libelle = 'Paye';
-        break;
-      case AppConstants.versementEnRetard:
-        couleur = AppColors.danger;
-        libelle = 'En retard';
-        break;
-      default:
-        couleur = AppColors.texteGris;
-        libelle = 'A venir';
+    final resteAPayer = ScheduleService.resteDu(v);
+    if (estPaye && resteAPayer > 0) {
+      // Paye en partie : le reste sera complete au prochain encaissement.
+      couleur = AppColors.danger;
+      libelle = 'Partiel (reste ${formaterMontant(resteAPayer, _devise)})';
+    } else if (estPaye) {
+      couleur = AppColors.succes;
+      libelle = 'Paye';
+    } else if (estDette) {
+      final rembourse = resteDette != null && resteDette <= 0;
+      couleur = rembourse ? AppColors.succes : AppColors.danger;
+      libelle = rembourse
+          ? 'Rembourse'
+          : resteDette == null
+              ? 'Dette'
+              : 'Dette (reste ${formaterMontant(resteDette, _devise)})';
+    } else if (passeeNonPayee || v.statut == AppConstants.versementEnRetard) {
+      couleur = AppColors.danger;
+      libelle = 'En retard';
+    } else {
+      couleur = AppColors.texteGris;
+      libelle = 'A venir';
     }
-
-    final estPaye = v.statut == AppConstants.versementPaye;
 
     return InkWell(
       borderRadius: BorderRadius.circular(10),
-      onTap: estPaye ? () => _modifierVersementPaye(v) : null,
+      onTap: estPaye
+          ? () => _modifierVersementPaye(v)
+          : estDette && v.detteId != null
+              ? () async {
+                  await Navigator.push(
+                      context, MaterialPageRoute(builder: (_) => DetteDetailScreen(detteId: v.detteId!)));
+                  _charger();
+                }
+              : null,
       child: Container(
         margin: const EdgeInsets.only(bottom: 8),
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -566,13 +755,24 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
                 fontSize: 12,
               ),
             ),
-            if (!estPaye) ...[
+            if (estDette) ...[
+              const SizedBox(width: 8),
+              const Icon(Icons.chevron_right, size: 18, color: AppColors.texteGris),
+            ] else if (!estPaye) ...[
               const SizedBox(width: 8),
               IconButton(
                 icon: const Icon(Icons.check_circle_outline, size: 20),
                 color: AppColors.succes,
+                tooltip: 'Valider le versement',
                 onPressed: () => _validerVersement(v),
               ),
+              if (passeeNonPayee)
+                IconButton(
+                  icon: const Icon(Icons.request_page_outlined, size: 20),
+                  color: AppColors.danger,
+                  tooltip: 'Marquer en dette',
+                  onPressed: () => _marquerEnDette(v),
+                ),
             ] else ...[
               const SizedBox(width: 8),
               Icon(Icons.edit_outlined, size: 16, color: AppColors.texteGris),

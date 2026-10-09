@@ -11,8 +11,10 @@ class Versement {
   final DateTime? dateValidation;
   final double montantPrevu;
   final double? montantPaye;
-  final String statut; // en_attente | paye | en_retard
+  final String statut; // en_attente | paye | en_retard | en_dette
   final String? notes;
+  /// Dette creee quand cette echeance a ete "marquee en dette" (statut en_dette).
+  final int? detteId;
 
   Versement({
     this.id,
@@ -23,6 +25,7 @@ class Versement {
     this.montantPaye,
     this.statut = AppConstants.versementEnAttente,
     this.notes,
+    this.detteId,
   });
 
   Versement copyWith({
@@ -40,6 +43,7 @@ class Versement {
       montantPaye: montantPaye ?? this.montantPaye,
       statut: statut ?? this.statut,
       notes: notes ?? this.notes,
+      detteId: detteId,
     );
   }
 
@@ -53,6 +57,7 @@ class Versement {
       'montant_paye': montantPaye,
       'statut': statut,
       'notes': notes,
+      'dette_id': detteId,
     };
   }
 
@@ -69,6 +74,7 @@ class Versement {
           map['montant_paye'] != null ? (map['montant_paye'] as num).toDouble() : null,
       statut: map['statut'] as String,
       notes: map['notes'] as String?,
+      detteId: map['dette_id'] as int?,
     );
   }
 }

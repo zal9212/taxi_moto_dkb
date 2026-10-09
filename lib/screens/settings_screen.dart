@@ -15,6 +15,7 @@ import 'dette/dettes_screen.dart';
 import 'lock_screen.dart';
 import 'stats_screen.dart';
 import '../utils/formatters.dart';
+import '../widgets/champ_devise.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -55,23 +56,53 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
   }
 
+  /// Devise globale : choisie dans la liste des devises (saisies une seule
+  /// fois). La liste se gere ici : ajouter, ou retirer une devise inutile.
   Future<void> _majDevise() async {
-    final ctrl = TextEditingController(text: _parametres!.deviseSymbole);
-    final valeur = await showDialog<String>(
+    final actuelle = _parametres!.deviseSymbole;
+    var devises = await _db.listerDevises();
+    if (!mounted) return;
+    final choix = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Symbole de devise'),
-        content: TextField(controller: ctrl, decoration: const InputDecoration(labelText: 'Ex: FG, FCFA, GNF')),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Annuler')),
-          ElevatedButton(onPressed: () => Navigator.pop(context, ctrl.text.trim()), child: const Text('Valider')),
-        ],
+      builder: (context) => StatefulBuilder(
+        builder: (context, setStateDialog) {
+          final options = {...devises, actuelle}.toList()..sort();
+          return SimpleDialog(
+            title: const Text('Devise'),
+            children: [
+              for (final d in options)
+                ListTile(
+                  leading: Icon(d == actuelle ? Icons.radio_button_checked : Icons.radio_button_off, size: 20),
+                  title: Text(d),
+                  trailing: d == actuelle
+                      ? null
+                      : IconButton(
+                          icon: const Icon(Icons.delete_outline, size: 18),
+                          tooltip: 'Retirer de la liste',
+                          onPressed: () async {
+                            await _db.supprimerDevise(d);
+                            devises = await _db.listerDevises();
+                            setStateDialog(() {});
+                          },
+                        ),
+                  onTap: () => Navigator.pop(context, d),
+                ),
+              ListTile(
+                leading: const Icon(Icons.add, size: 20),
+                title: const Text('Ajouter une devise...'),
+                onTap: () async {
+                  final code = await ajouterDeviseDialogue(context);
+                  if (code != null && context.mounted) Navigator.pop(context, code);
+                },
+              ),
+            ],
+          );
+        },
       ),
     );
-    if (valeur != null && valeur.isNotEmpty) {
-      await _db.enregistrerParametres(_parametres!.copyWith(deviseSymbole: valeur));
-      _charger();
-    }
+    if (choix == null || choix == actuelle) return;
+    await _db.enregistrerParametres(_parametres!.copyWith(deviseSymbole: choix));
+    _charger();
   }
 
   Future<void> _majDelaiNotification() async {
@@ -217,6 +248,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  /// Apres une restauration ou un import, les rappels programmes visaient
+  /// les echeances de l'ancienne base (id reutilises -> rappels pour des
+  /// motos qui n'existent plus) : on repart de zero. Secondaire : un echec
+  /// du plugin ne doit pas faire echouer la restauration elle-meme.
+  Future<void> _reprogrammerRappels() async {
+    try {
+      await NotificationService.reprogrammerTousLesRappels();
+    } catch (_) {}
+  }
+
   Future<void> _restaurerSauvegarde() async {
     final chemin = await BackupService.choisirFichierSauvegarde();
     if (chemin == null || !mounted) return;
@@ -244,6 +285,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _restaurationEnCours = true);
     try {
       await BackupService.restaurer(chemin);
+      await _reprogrammerRappels();
       if (!mounted) return;
       // Repart de l'ecran de verrouillage pour que tout l'etat de l'app
       // (motos, reglages...) soit recharge depuis la base restauree.
@@ -330,6 +372,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _importExcelEnCours = true);
     try {
       final rapport = await ExcelService.importer(chemin, remplacementComplet: mode == 'remplacement');
+      await _reprogrammerRappels();
       if (!mounted) return;
       await _afficherRapportImportExcel(rapport);
       if (!mounted) return;

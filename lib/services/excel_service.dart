@@ -9,12 +9,14 @@ import 'package:share_plus/share_plus.dart';
 import '../core/constants.dart';
 import '../models/categorie_activite.dart';
 import '../models/categorie_entite.dart';
+import '../models/categorie_gerant.dart';
 import '../models/categorie_transaction.dart';
 import '../models/depense.dart';
 import '../models/dette.dart';
 import '../models/moto.dart';
 import '../models/versement.dart';
 import 'database_service.dart';
+import 'schedule_service.dart';
 
 /// Une erreur de validation sur une ligne precise d'une feuille, remontee
 /// a l'utilisateur apres import (le reste du fichier continue d'etre
@@ -129,6 +131,27 @@ class ExcelService {
   // -------------------------------------------------------------------
 
   static Future<void> exporter() async {
+    final bytes = await classeurComplet();
+    final horodatage = DateTime.now();
+    final nomFichier = 'moto_taxi_douka_${_isoCompact(horodatage)}.xlsx';
+
+    // share_plus copie lui-meme le fichier fourni dans son propre dossier
+    // de cache interne ("<cache>/share_plus/") avant de le partager ; lui
+    // donner un fichier deja place dedans le fait refuser (meme contrainte
+    // que pour la sauvegarde .db, voir BackupService.exporter()).
+    final dossierTemp = await getTemporaryDirectory();
+    final cheminExport = p.join(dossierTemp.path, nomFichier);
+    await File(cheminExport).writeAsBytes(bytes);
+
+    await Share.shareXFiles(
+      [XFile(cheminExport)],
+      subject: 'Export Excel Douka Moto',
+      text: 'Export Excel Douka Moto du ${_formaterDate(horodatage)}',
+    );
+  }
+
+  /// Classeur de toutes les donnees (ce que [exporter] partage).
+  static Future<List<int>> classeurComplet() async {
     final db = DatabaseService.instance;
     final motos = await db.listerMotos();
     final motosParId = {for (final m in motos) m.id: m};
@@ -175,15 +198,16 @@ class ExcelService {
       TextCellValue('Montant paye'),
       TextCellValue('Statut'),
       TextCellValue('Notes'),
+      // En derniere position : les anciens fichiers restent importables.
+      TextCellValue('Dette ID'),
     ]);
     for (final m in motos) {
       if (m.id == null) continue;
       final versements = await db.listerVersementsParMoto(m.id!);
-      // Seuls les versements reellement effectues sont exportes : les
-      // echeances en attente/en retard ne sont pas encore de l'argent
-      // recu, et sont de toute facon regenerees automatiquement par
-      // assurerEcheances() (fenetre glissante) au premier chargement.
-      for (final v in versements.where((v) => v.statut == AppConstants.versementPaye)) {
+      // Toutes les echeances sont exportees : les retards et les dettes sont
+      // de l'argent du, qui ne se regenere pas (un retard entre deux
+      // paiements serait perdu au reimport).
+      for (final v in versements) {
         sVersements.appendRow([
           v.id != null ? IntCellValue(v.id!) : null,
           IntCellValue(v.motoId),
@@ -194,6 +218,7 @@ class ExcelService {
           v.montantPaye != null ? DoubleCellValue(v.montantPaye!) : null,
           TextCellValue(v.statut),
           v.notes != null ? TextCellValue(v.notes!) : null,
+          v.detteId != null ? IntCellValue(v.detteId!) : null,
         ]);
       }
     }
@@ -282,7 +307,9 @@ class ExcelService {
       TextCellValue('Montant'),
       TextCellValue('Date'),
       TextCellValue('Description'),
+      TextCellValue('Personne'),
     ]);
+    final nomsGerants = await _nomsGerants(entitesActiviteParId.keys);
     for (final c in categoriesActivite) {
       if (c.id == null) continue;
       final transactions = await db.listerTransactionsCategorie(c.id!);
@@ -296,6 +323,7 @@ class ExcelService {
           DoubleCellValue(t.montant),
           TextCellValue(_iso(t.date)),
           t.description != null ? TextCellValue(t.description!) : null,
+          TextCellValue(nomsGerants[t.gerantId] ?? AppConstants.libelleProprietaire),
         ]);
       }
     }
@@ -311,23 +339,7 @@ class ExcelService {
     if (bytes == null) {
       throw Exception('Echec de la generation du fichier Excel.');
     }
-
-    final horodatage = DateTime.now();
-    final nomFichier = 'moto_taxi_douka_${_isoCompact(horodatage)}.xlsx';
-
-    // share_plus copie lui-meme le fichier fourni dans son propre dossier
-    // de cache interne ("<cache>/share_plus/") avant de le partager ; lui
-    // donner un fichier deja place dedans le fait refuser (meme contrainte
-    // que pour la sauvegarde .db, voir BackupService.exporter()).
-    final dossierTemp = await getTemporaryDirectory();
-    final cheminExport = p.join(dossierTemp.path, nomFichier);
-    await File(cheminExport).writeAsBytes(bytes);
-
-    await Share.shareXFiles(
-      [XFile(cheminExport)],
-      subject: 'Export Excel Douka Moto',
-      text: 'Export Excel Douka Moto du ${_formaterDate(horodatage)}',
-    );
+    return bytes;
   }
 
   // -------------------------------------------------------------------
@@ -438,7 +450,13 @@ class ExcelService {
           continue;
         }
 
-        final idFourni = !remplacementComplet && idTxte != null ? int.tryParse(idTxte) : null;
+        var idFourni = !remplacementComplet && idTxte != null ? int.tryParse(idTxte) : null;
+        if (idFourni != null) {
+          // Un numero est propre a chaque telephone : meme numero mais autre
+          // nom = une autre moto, qu'on ajoute au lieu de l'ecraser.
+          final existante = await db.obtenirMoto(idFourni);
+          if (existante == null || existante.nom.toLowerCase() != nom.toLowerCase()) idFourni = null;
+        }
         final moto = Moto(
           id: idFourni,
           nom: nom,
@@ -479,6 +497,9 @@ class ExcelService {
         if (c.id != null) c.nom.toLowerCase(): c.id!
     };
 
+    // Echeances "en dette" importees, a rattacher a leur dette une fois les
+    // dettes importees.
+    final liensDettes = <({int versementId, int? detteFichier})>[];
     final sVersements = excel.tables[_feuilleVersements];
     if (sVersements != null) {
       for (var i = 1; i < sVersements.maxRows; i++) {
@@ -515,7 +536,12 @@ class ExcelService {
                 _feuilleVersements, numeroLigne, 'Moto introuvable (ID "$motoIdTxte" / nom "$motoNom").'));
             continue;
           }
-          if (![AppConstants.versementEnAttente, AppConstants.versementPaye, AppConstants.versementEnRetard]
+          if (![
+            AppConstants.versementEnAttente,
+            AppConstants.versementPaye,
+            AppConstants.versementEnRetard,
+            AppConstants.versementEnDette,
+          ]
               .contains(statut)) {
             rapport.erreurs.add(LigneErreurImport(_feuilleVersements, numeroLigne, 'Statut invalide : "$statut".'));
             continue;
@@ -528,11 +554,27 @@ class ExcelService {
             continue;
           }
           final dateValidation = dateValidationTxt != null ? DateTime.tryParse(dateValidationTxt) : null;
-          final montantPaye = montantPayeTxt != null ? double.tryParse(montantPayeTxt) : null;
+          // "Paye" sans montant : on considere le montant prevu comme recu,
+          // sinon ce versement compterait comme impaye dans le solde.
+          final montantPaye = (montantPayeTxt != null ? double.tryParse(montantPayeTxt) : null) ??
+              (statut == AppConstants.versementPaye ? montantPrevu : null);
 
-          final idFourni = !remplacementComplet && idTxte != null ? int.tryParse(idTxte) : null;
+          var idCible = !remplacementComplet && idTxte != null ? int.tryParse(idTxte) : null;
+          if (idCible != null) {
+            // Le numero ne suffit pas (propre a chaque telephone) : il doit
+            // designer la meme echeance (meme moto, meme date).
+            final existante = await db.obtenirVersement(idCible);
+            if (existante == null ||
+                existante.motoId != motoId ||
+                ScheduleService.dateSeule(existante.dateEcheance) != ScheduleService.dateSeule(dateEcheance)) {
+              idCible = null;
+            }
+          }
+          // Une seule echeance par moto et par date : on complete celle qui
+          // existe deja au lieu d'en creer une deuxieme.
+          idCible ??= (await db.trouverVersement(motoId, dateEcheance))?.id;
           final versement = Versement(
-            id: idFourni,
+            id: idCible,
             motoId: motoId,
             dateEcheance: dateEcheance,
             dateValidation: dateValidation,
@@ -542,16 +584,18 @@ class ExcelService {
             notes: notes,
           );
 
-          var misAJour = false;
-          if (versement.id != null) {
-            final lignesAffectees = await db.modifierVersement(versement);
-            misAJour = lignesAffectees > 0;
-          }
-          if (misAJour) {
+          final int idFinal;
+          if (idCible != null && await db.modifierVersement(versement) > 0) {
+            idFinal = idCible;
             rapport.versementsMisAJour++;
           } else {
-            await db.insererVersement(versement);
+            idFinal = await db.insererVersement(versement);
             rapport.versementsCrees++;
+          }
+          if (statut == AppConstants.versementEnDette) {
+            // Colonne 10 : absente des anciens fichiers. Lien refait apres
+            // l'import des dettes (leurs numeros changent).
+            liensDettes.add((versementId: idFinal, detteFichier: int.tryParse(_texte(_valeur(ligne, 9)) ?? '')));
           }
         } catch (e) {
           rapport.erreurs.add(LigneErreurImport(_feuilleVersements, numeroLigne, 'Erreur inattendue : $e'));
@@ -662,7 +706,8 @@ class ExcelService {
           }
           final dateCreation = dateCreationTxt != null ? DateTime.tryParse(dateCreationTxt) : null;
 
-          final idFourni = !remplacementComplet && idTxte != null ? int.tryParse(idTxte) : null;
+          final idFourni = await _idSiMemeLigne(!remplacementComplet && idTxte != null ? int.tryParse(idTxte) : null, db.obtenirCategorieActivite,
+              (c) => c.nom.toLowerCase() == nom.toLowerCase());
           final categorie = CategorieActivite(
             id: idFourni,
             nom: nom,
@@ -738,7 +783,8 @@ class ExcelService {
             continue;
           }
 
-          final idFourni = !remplacementComplet && idTxte != null ? int.tryParse(idTxte) : null;
+          final idFourni = await _idSiMemeLigne(!remplacementComplet && idTxte != null ? int.tryParse(idTxte) : null, db.obtenirEntiteCategorie,
+              (e) => e.categorieId == categorieId && e.nom.toLowerCase() == nom.toLowerCase());
           final entite = CategorieEntite(
             id: idFourni,
             categorieId: categorieId,
@@ -770,6 +816,7 @@ class ExcelService {
     }
 
     final sCategorieTransactions = excel.tables[_feuilleCategorieTransactions];
+    final gerantsCrees = <String, int>{};
     if (sCategorieTransactions != null) {
       for (var i = 1; i < sCategorieTransactions.maxRows; i++) {
         final ligne = sCategorieTransactions.rows[i];
@@ -784,6 +831,7 @@ class ExcelService {
           final montantTxt = _texte(_valeur(ligne, 5));
           final dateTxt = _texte(_valeur(ligne, 6));
           final description = _texte(_valeur(ligne, 7));
+          final personne = _texte(_valeur(ligne, 8));
 
           if ((entiteIdTxte == null && (entiteNom == null || categorieNom == null)) ||
               type == null ||
@@ -819,7 +867,7 @@ class ExcelService {
             continue;
           }
 
-          final idFourni = !remplacementComplet && idTxte != null ? int.tryParse(idTxte) : null;
+          final idFourni = await _idSiMemeOperation(!remplacementComplet && idTxte != null ? int.tryParse(idTxte) : null, entiteId, type, date);
           final transaction = CategorieTransaction(
             id: idFourni,
             entiteId: entiteId,
@@ -827,6 +875,7 @@ class ExcelService {
             montant: montant,
             date: date,
             description: description,
+            gerantId: await _resoudreGerant(entiteId, personne, gerantsCrees),
           );
 
           var misAJour = false;
@@ -999,6 +1048,12 @@ class ExcelService {
       }
     }
 
+    // Sans dette retrouvee, l'echeance redevient un retard (rien de perdu).
+    for (final lien in liensDettes) {
+      await db.lierVersementADette(
+          lien.versementId, lien.detteFichier != null ? idDetteFichierVersDb[lien.detteFichier] : null);
+    }
+
     return rapport;
   }
 
@@ -1012,6 +1067,24 @@ class ExcelService {
   /// Exporte les entites et transactions d'une seule categorie (chaque
   /// categorie a sa propre devise, jamais melangee avec une autre).
   static Future<void> exporterCategorie(CategorieActivite categorie) async {
+    final bytes = await classeurCategorie(categorie);
+    final horodatage = DateTime.now();
+    final nomFichierSuffixe = categorie.nom.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '_');
+    final nomFichier = 'douka_${nomFichierSuffixe}_${_isoCompact(horodatage)}.xlsx';
+
+    final dossierTemp = await getTemporaryDirectory();
+    final cheminExport = p.join(dossierTemp.path, nomFichier);
+    await File(cheminExport).writeAsBytes(bytes);
+
+    await Share.shareXFiles(
+      [XFile(cheminExport)],
+      subject: 'Export Excel ${categorie.nom}',
+      text: 'Export Excel ${categorie.nom} du ${_formaterDate(horodatage)}',
+    );
+  }
+
+  /// Classeur d'une categorie (ce que [exporterCategorie] partage).
+  static Future<List<int>> classeurCategorie(CategorieActivite categorie) async {
     final db = DatabaseService.instance;
     final entites = await db.listerEntitesCategorie(categorie.id!);
     final entitesParId = {for (final e in entites) e.id: e};
@@ -1045,7 +1118,9 @@ class ExcelService {
       TextCellValue('Montant'),
       TextCellValue('Date'),
       TextCellValue('Description'),
+      TextCellValue('Personne'),
     ]);
+    final nomsGerants = await _nomsGerants(entitesParId.keys.whereType<int>());
     for (final t in transactions) {
       sTransactions.appendRow([
         t.id != null ? IntCellValue(t.id!) : null,
@@ -1055,6 +1130,7 @@ class ExcelService {
         DoubleCellValue(t.montant),
         TextCellValue(_iso(t.date)),
         t.description != null ? TextCellValue(t.description!) : null,
+        TextCellValue(nomsGerants[t.gerantId] ?? AppConstants.libelleProprietaire),
       ]);
     }
 
@@ -1066,20 +1142,7 @@ class ExcelService {
     if (bytes == null) {
       throw Exception('Echec de la generation du fichier Excel.');
     }
-
-    final horodatage = DateTime.now();
-    final nomFichierSuffixe = categorie.nom.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '_');
-    final nomFichier = 'douka_${nomFichierSuffixe}_${_isoCompact(horodatage)}.xlsx';
-
-    final dossierTemp = await getTemporaryDirectory();
-    final cheminExport = p.join(dossierTemp.path, nomFichier);
-    await File(cheminExport).writeAsBytes(bytes);
-
-    await Share.shareXFiles(
-      [XFile(cheminExport)],
-      subject: 'Export Excel ${categorie.nom}',
-      text: 'Export Excel ${categorie.nom} du ${_formaterDate(horodatage)}',
-    );
+    return bytes;
   }
 
   /// Importe un fichier Excel genere par [exporterCategorie] dans une
@@ -1130,7 +1193,8 @@ class ExcelService {
           continue;
         }
 
-        final idFourni = !remplacementComplet && idTxte != null ? int.tryParse(idTxte) : null;
+        final idFourni = await _idSiMemeLigne(!remplacementComplet && idTxte != null ? int.tryParse(idTxte) : null, db.obtenirEntiteCategorie,
+            (e) => e.categorieId == categorieId && e.nom.toLowerCase() == nom.toLowerCase());
         final entite = CategorieEntite(
           id: idFourni,
           categorieId: categorieId,
@@ -1161,6 +1225,7 @@ class ExcelService {
     }
 
     final sTransactions = excel.tables[_feuilleTransactions];
+    final gerantsCrees = <String, int>{};
     if (sTransactions != null) {
       for (var i = 1; i < sTransactions.maxRows; i++) {
         final ligne = sTransactions.rows[i];
@@ -1174,6 +1239,7 @@ class ExcelService {
           final montantTxt = _texte(_valeur(ligne, 4));
           final dateTxt = _texte(_valeur(ligne, 5));
           final description = _texte(_valeur(ligne, 6));
+          final personne = _texte(_valeur(ligne, 7));
 
           if ((entiteIdTxte == null && entiteNom == null) || type == null || montantTxt == null || dateTxt == null) {
             rapport.erreurs.add(LigneErreurImport(_feuilleTransactions, numeroLigne,
@@ -1199,7 +1265,7 @@ class ExcelService {
             continue;
           }
 
-          final idFourni = !remplacementComplet && idTxte != null ? int.tryParse(idTxte) : null;
+          final idFourni = await _idSiMemeOperation(!remplacementComplet && idTxte != null ? int.tryParse(idTxte) : null, entiteId, type, date);
           final transaction = CategorieTransaction(
             id: idFourni,
             entiteId: entiteId,
@@ -1207,6 +1273,7 @@ class ExcelService {
             montant: montant,
             date: date,
             description: description,
+            gerantId: await _resoudreGerant(entiteId, personne, gerantsCrees),
           );
 
           var misAJour = false;
@@ -1508,6 +1575,53 @@ class ExcelService {
         ]);
       }
     }
+  }
+
+  /// Un numero est propre a chaque telephone : dans une fusion, il ne designe
+  /// une ligne existante que si [memeLigne] le confirme (meme nom...) ; sinon
+  /// la ligne du fichier est ajoutee au lieu d'ecraser une autre.
+  static Future<int?> _idSiMemeLigne<T>(
+      int? id, Future<T?> Function(int id) obtenir, bool Function(T existante) memeLigne) async {
+    if (id == null) return null;
+    final existante = await obtenir(id);
+    return existante != null && memeLigne(existante) ? id : null;
+  }
+
+  /// Meme operation : meme entite, meme type, meme jour (montant, description
+  /// et personne peuvent avoir ete corriges dans le fichier).
+  static Future<int?> _idSiMemeOperation(int? id, int entiteId, String type, DateTime date) =>
+      _idSiMemeLigne(
+          id,
+          DatabaseService.instance.obtenirTransactionCategorie,
+          (t) =>
+              t.entiteId == entiteId &&
+              t.type == type &&
+              t.date.year == date.year &&
+              t.date.month == date.month &&
+              t.date.day == date.day);
+
+  /// Nom de chaque gerant des entites donnees, par id (colonne "Personne").
+  static Future<Map<int?, String>> _nomsGerants(Iterable<int> entiteIds) async {
+    final db = DatabaseService.instance;
+    return {
+      for (final id in entiteIds)
+        for (final g in await db.listerGerants(id)) g.id: g.nom,
+    };
+  }
+
+  /// Colonne "Personne" d'une operation : vide (fichiers d'avant les
+  /// gerants) ou "Proprietaire" = le proprietaire (null) ; sinon le gerant
+  /// de ce nom dans l'entite, cree s'il n'existe pas encore.
+  // ponytail: un gerant recree a l'import revient actif (statut archive non exporte).
+  static Future<int?> _resoudreGerant(int entiteId, String? nom, Map<String, int> cache) async {
+    if (nom == null || nom.toLowerCase() == AppConstants.libelleProprietaire.toLowerCase()) return null;
+    final cle = '$entiteId::${nom.toLowerCase()}';
+    final connu = cache[cle];
+    if (connu != null) return connu;
+    final db = DatabaseService.instance;
+    final existant =
+        (await db.listerGerants(entiteId)).where((g) => g.nom.toLowerCase() == nom.toLowerCase()).firstOrNull;
+    return cache[cle] = existant?.id ?? await db.insererGerant(CategorieGerant(entiteId: entiteId, nom: nom));
   }
 
   static bool _ligneVide(List<Data?> ligne) => ligne.every((c) => _texte(c?.value) == null);

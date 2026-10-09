@@ -42,49 +42,66 @@ class NotificationService {
         ?.requestPermissions(alert: true, badge: true, sound: true);
   }
 
-  /// Programme un rappel pour un versement donné, `delaiHeures` avant
-  /// la date d'échéance.
+  /// Decalage d'id de l'alerte de retard d'un versement (l'id du rappel est
+  /// l'id du versement lui-meme) : les deux s'annulent ensemble.
+  static const _decalageAlerteRetard = 1000000000;
+
+  /// Programme, pour un versement : un rappel `delaiHeures` avant
+  /// l'échéance, et une alerte le lendemain à 9 h s'il n'a pas été payé
+  /// (c'est là qu'il passe en retard). Payer l'échéance annule les deux.
   static Future<void> planifierRappel({
     required Versement versement,
     required Moto moto,
     required int delaiHeures,
   }) async {
     if (versement.id == null) return;
+    final d = versement.dateEcheance;
+    final montant = versement.montantPrevu.toStringAsFixed(0);
 
-    final dateRappel =
-        versement.dateEcheance.subtract(Duration(hours: delaiHeures));
-    if (dateRappel.isBefore(DateTime.now())) return; // déjà passé, on ignore
-
-    const androidDetails = AndroidNotificationDetails(
-      'rappels_versements',
-      'Rappels de versement',
-      channelDescription: 'Notifications de rappel des echeances de versement',
-      importance: Importance.high,
-      priority: Priority.high,
-    );
-    const details = NotificationDetails(
-      android: androidDetails,
-      iOS: DarwinNotificationDetails(),
-    );
-
-    await _plugin.zonedSchedule(
+    await _programmer(
       versement.id!, // id unique = id du versement, permet d'annuler facilement
       'Versement a venir - ${moto.nom}',
-      'Echeance de ${versement.montantPrevu.toStringAsFixed(0)} prevue le '
-          '${_formaterDate(versement.dateEcheance)}',
-      tz.TZDateTime.from(dateRappel, tz.local),
+      'Echeance de $montant prevue le ${_formaterDate(d)}',
+      d.subtract(Duration(hours: delaiHeures)),
+    );
+    await _programmer(
+      versement.id! + _decalageAlerteRetard,
+      'Versement non recu - ${moto.nom}',
+      '${moto.chauffeur} n\'a pas encore paye l\'echeance du ${_formaterDate(d)} ($montant). '
+          'Pensez a relancer.',
+      DateTime(d.year, d.month, d.day + 1, 9),
+    );
+  }
+
+  static Future<void> _programmer(int id, String titre, String texte, DateTime quand) async {
+    if (quand.isBefore(DateTime.now())) return; // déjà passé, on ignore
+    const details = NotificationDetails(
+      android: AndroidNotificationDetails(
+        'rappels_versements',
+        'Rappels de versement',
+        channelDescription: 'Notifications de rappel des echeances de versement',
+        importance: Importance.high,
+        priority: Priority.high,
+      ),
+      iOS: DarwinNotificationDetails(),
+    );
+    await _plugin.zonedSchedule(
+      id,
+      titre,
+      texte,
+      tz.TZDateTime.from(quand, tz.local),
       details,
       // Mode inexact : ne necessite pas la permission "alarmes exactes"
       // (refusee par defaut sur Android 12+). Un rappel peut arriver avec
       // quelques minutes de decalage, ce qui est sans consequence ici.
       androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
+      uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
     );
   }
 
   static Future<void> annulerRappel(int versementId) async {
     await _plugin.cancel(versementId);
+    await _plugin.cancel(versementId + _decalageAlerteRetard);
   }
 
   /// Synchronise les rappels d'une moto avec son statut actuel : programme
@@ -96,7 +113,9 @@ class NotificationService {
     required List<Versement> versements,
     required int delaiHeures,
   }) async {
-    final nonPayes = versements.where((v) => v.statut != AppConstants.versementPaye);
+    // Une echeance passee en dette se suit dans Dettes : plus de rappel.
+    final nonPayes = versements.where(
+        (v) => v.statut != AppConstants.versementPaye && v.statut != AppConstants.versementEnDette);
 
     if (moto.statut != AppConstants.motoActive) {
       for (final v in nonPayes) {
@@ -108,6 +127,24 @@ class NotificationService {
     for (final v in nonPayes) {
       await planifierRappel(versement: v, moto: moto, delaiHeures: delaiHeures);
     }
+  }
+
+  /// Complète les échéances d'une moto active (fenêtre glissante) et
+  /// programme les rappels de celles qui viennent d'être créées — sans ça,
+  /// les rappels s'arrêtaient après les premières échéances de la moto.
+  static Future<void> assurerEcheancesEtRappels(Moto moto) async {
+    final db = DatabaseService.instance;
+    if (moto.id == null || await db.assurerEcheances(moto) == 0) return;
+    // Le rappel est secondaire : un echec du plugin de notifications ne
+    // doit pas bloquer le chargement des ecrans qui appellent ceci.
+    try {
+      final params = await db.obtenirParametres();
+      await synchroniserRappelsMoto(
+        moto: moto,
+        versements: await db.listerVersementsParMoto(moto.id!),
+        delaiHeures: params.delaiNotificationHeures,
+      );
+    } catch (_) {}
   }
 
   /// Reprogramme tous les rappels en attente — utile après un changement
@@ -122,7 +159,7 @@ class NotificationService {
       if (moto.id == null) continue;
       final versements = await DatabaseService.instance.listerVersementsParMoto(moto.id!);
       for (final v in versements) {
-        if (v.statut != AppConstants.versementPaye) {
+        if (v.statut != AppConstants.versementPaye && v.statut != AppConstants.versementEnDette) {
           await planifierRappel(
             versement: v,
             moto: moto,

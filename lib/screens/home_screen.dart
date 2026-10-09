@@ -6,6 +6,7 @@ import '../models/moto.dart';
 import '../models/versement.dart';
 import '../models/parametre.dart';
 import '../services/database_service.dart';
+import '../services/notification_service.dart';
 import '../utils/formatters.dart';
 import '../widgets/moto_card.dart';
 import '../widgets/activity_tile.dart';
@@ -24,7 +25,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final _db = DatabaseService.instance;
 
   int _ongletActif = 0;
@@ -37,14 +38,35 @@ class _HomeScreenState extends State<HomeScreen> {
   List<Moto> _motos = [];
   double _totalEncaisse = 0;
   double _totalEnRetard = 0;
+  int _motosAJour = 0;
   List<_ActiviteRecente> _activites = [];
-
-  bool _chargement = true;
+  List<_MotoAvecInfos> _infosMotos = [];
+  bool _etaitEnArrierePlan = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _charger();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  /// Recharge au retour au premier plan apres une vraie mise en arriere-plan
+  /// (un nouveau jour a pu commencer : retards, nouvelles echeances). Pas
+  /// apres un selecteur de fichier ou un partage, qui ne passent pas par
+  /// "paused" — meme regle que le reverrouillage dans main.dart.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) _etaitEnArrierePlan = true;
+    if (state == AppLifecycleState.resumed && _etaitEnArrierePlan) {
+      _etaitEnArrierePlan = false;
+      _charger();
+    }
   }
 
   ({DateTime? debut, DateTime? fin}) get _bornesPeriode {
@@ -60,7 +82,6 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _charger() async {
-    setState(() => _chargement = true);
     await _db.actualiserRetards();
 
     final bornes = _bornesPeriode;
@@ -71,37 +92,50 @@ class _HomeScreenState extends State<HomeScreen> {
     // (versement recurrent et indefini) - toute modification (montant,
     // frequence...) se repercute donc immediatement sur tout le reste.
     for (final m in motos.where((m) => m.statut == AppConstants.motoActive)) {
-      await _db.assurerEcheances(m);
+      await NotificationService.assurerEcheancesEtRappels(m);
     }
     final totalEncaisse = await _db.totalEncaisse(
       motoId: _motoFiltreId,
       debut: bornes.debut,
       fin: bornes.fin,
     );
-    final solde = await _db.soldeNet(motoId: _motoFiltreId);
-    final totalEnRetard = solde < 0 ? -solde : 0.0;
+    // Retard compte moto par moto : l'avance de l'une ne compense pas le
+    // retard d'une autre, et les motos suspendues n'entrent pas en compte.
+    final soldes = await _db.soldesMotosActives(motoId: _motoFiltreId);
 
-    final versementsRecents = await _db.listerVersementsRecents(
+    final paiementsRecents = await _db.listerPaiementsRecents(
       motoId: _motoFiltreId,
       debut: bornes.debut,
       fin: bornes.fin,
       limite: 15,
     );
-    final depensesRecentes = await _db.listerDepensesRecentes(motoId: _motoFiltreId, limite: 15);
+    final depensesRecentes = await _db.listerDepensesRecentes(
+      motoId: _motoFiltreId,
+      debut: bornes.debut,
+      fin: bornes.fin,
+      limite: 15,
+    );
+    final remboursementsRecents = await _db.listerRemboursementsMotos(
+      motoId: _motoFiltreId,
+      debut: bornes.debut,
+      fin: bornes.fin,
+      limite: 15,
+    );
+    final infosMotos = await _chargerInfosMotos(motos);
 
     final motosParId = {for (final m in motos) m.id: m};
     final categories = {for (final c in await _db.listerCategories()) c.id: c};
 
     final activites = <_ActiviteRecente>[
-      ...versementsRecents.where((v) => v.statut == AppConstants.versementPaye).map(
-            (v) => _ActiviteRecente(
-              titre: 'Versement - ${motosParId[v.motoId]?.nom ?? 'Moto'} - '
-                  '${motosParId[v.motoId]?.chauffeur ?? ''}',
-              date: v.dateValidation ?? v.dateEcheance,
-              montant: v.montantPaye ?? v.montantPrevu,
+      ...paiementsRecents.map(
+            (p) => _ActiviteRecente(
+              titre: 'Versement - ${motosParId[p.motoId]?.nom ?? 'Moto'} - '
+                  '${motosParId[p.motoId]?.chauffeur ?? ''}',
+              date: p.date,
+              montant: p.montant,
               estPositif: true,
               icone: Icons.check_circle_outline,
-              motoId: v.motoId,
+              motoId: p.motoId,
             ),
           ),
       ...depensesRecentes.map(
@@ -115,6 +149,17 @@ class _HomeScreenState extends State<HomeScreen> {
           motoId: d.motoId,
         ),
       ),
+      // Encaisse dans la caisse de la moto liee (voir totalEncaisse).
+      ...remboursementsRecents.map(
+        (e) => _ActiviteRecente(
+          titre: 'Remboursement dette - ${e.dette.nomPersonne} - ${motosParId[e.dette.lienId]?.nom ?? ''}',
+          date: e.remboursement.date,
+          montant: e.remboursement.montant,
+          estPositif: true,
+          icone: Icons.request_page_outlined,
+          motoId: e.dette.lienId,
+        ),
+      ),
     ]..sort((a, b) => b.date.compareTo(a.date));
 
     if (!mounted) return;
@@ -122,9 +167,10 @@ class _HomeScreenState extends State<HomeScreen> {
       _parametres = params;
       _motos = motos;
       _totalEncaisse = totalEncaisse;
-      _totalEnRetard = totalEnRetard;
+      _totalEnRetard = soldes.values.where((s) => s < 0).fold(0.0, (total, s) => total - s);
+      _motosAJour = soldes.values.where((s) => s >= 0).length;
       _activites = activites.take(10).toList();
-      _chargement = false;
+      _infosMotos = infosMotos;
     });
   }
 
@@ -138,7 +184,9 @@ class _HomeScreenState extends State<HomeScreen> {
     ];
 
     return Scaffold(
-      body: SafeArea(child: _chargement ? const Center(child: CircularProgressIndicator()) : pages[_ongletActif]),
+      // Spinner au tout premier chargement seulement : ensuite les donnees se
+      // rafraichissent sous les yeux, sans detruire l'onglet ouvert.
+      body: SafeArea(child: _parametres == null ? const Center(child: CircularProgressIndicator()) : pages[_ongletActif]),
       floatingActionButton: _ongletActif == 1
           ? FloatingActionButton(
               backgroundColor: AppColors.carteNoire,
@@ -244,7 +292,7 @@ class _HomeScreenState extends State<HomeScreen> {
           Row(
             children: [
               Expanded(
-                child: _miniStat('A jour', formaterMontant(_totalEncaisse, devise), AppColors.accentLime),
+                child: _miniStat('A jour', '$_motosAJour moto(s)', AppColors.accentLime),
               ),
               const SizedBox(width: 8),
               Expanded(
@@ -363,17 +411,15 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _pageMotos() {
     final devise = _parametres?.deviseSymbole ?? AppConstants.devisePardDefaut;
 
+    // Infos calculees une fois dans _charger : la recherche et le tri ne
+    // relancent plus de requetes a chaque lettre tapee.
+    final toutesLesMotos = _infosMotos;
+    final items = _filtrerEtTrierMotos(toutesLesMotos);
+
     return RefreshIndicator(
       onRefresh: _charger,
-      child: FutureBuilder<List<_MotoAvecInfos>>(
-        future: _chargerInfosMotos(),
-        builder: (context, snapshot) {
-          if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
-          final toutesLesMotos = snapshot.data!;
-          final items = _filtrerEtTrierMotos(toutesLesMotos);
-
-          if (toutesLesMotos.isEmpty) {
-            return ListView(
+      child: toutesLesMotos.isEmpty
+          ? ListView(
               children: [
                 const SizedBox(height: 80),
                 Center(
@@ -382,44 +428,40 @@ class _HomeScreenState extends State<HomeScreen> {
                       style: TextStyle(color: AppColors.texteGris, fontSize: 13)),
                 ),
               ],
-            );
-          }
-
-          return ListView(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 90),
-            children: [
-              _barreRechercheEtTriMotos(),
-              const SizedBox(height: 12),
-              if (items.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 40),
-                  child: Center(
-                    child: Text('Aucun resultat pour cette recherche.',
-                        style: TextStyle(color: AppColors.texteGris, fontSize: 13)),
-                  ),
-                )
-              else
-                ...items.map((item) => Padding(
-                      padding: const EdgeInsets.only(bottom: 10),
-                      child: MotoCard(
-                        moto: item.moto,
-                        totalVerse: item.totalVerse,
-                        solde: item.solde,
-                        prochainVersement: item.prochain,
-                        devise: devise,
-                        onTap: () async {
-                          await Navigator.push(
-                            context,
-                            MaterialPageRoute(builder: (_) => MotoDetailScreen(motoId: item.moto.id!)),
-                          );
-                          _charger();
-                        },
-                      ),
-                    )),
-            ],
-          );
-        },
-      ),
+            )
+          : ListView(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 90),
+              children: [
+                _barreRechercheEtTriMotos(),
+                const SizedBox(height: 12),
+                if (items.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 40),
+                    child: Center(
+                      child: Text('Aucun resultat pour cette recherche.',
+                          style: TextStyle(color: AppColors.texteGris, fontSize: 13)),
+                    ),
+                  )
+                else
+                  ...items.map((item) => Padding(
+                        padding: const EdgeInsets.only(bottom: 10),
+                        child: MotoCard(
+                          moto: item.moto,
+                          totalVerse: item.totalVerse,
+                          solde: item.solde,
+                          prochainVersement: item.prochain,
+                          devise: devise,
+                          onTap: () async {
+                            await Navigator.push(
+                              context,
+                              MaterialPageRoute(builder: (_) => MotoDetailScreen(motoId: item.moto.id!)),
+                            );
+                            _charger();
+                          },
+                        ),
+                      )),
+              ],
+            ),
     );
   }
 
@@ -496,9 +538,9 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Future<List<_MotoAvecInfos>> _chargerInfosMotos() async {
+  Future<List<_MotoAvecInfos>> _chargerInfosMotos(List<Moto> motos) async {
     final resultats = <_MotoAvecInfos>[];
-    for (final moto in _motos) {
+    for (final moto in motos) {
       if (moto.id == null) continue;
       final totalVerse = await _db.totalEncaisse(motoId: moto.id!);
       final solde = await _db.soldeNet(motoId: moto.id!);

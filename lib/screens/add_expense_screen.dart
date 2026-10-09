@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/moto.dart';
 import '../models/depense.dart';
 import '../services/database_service.dart';
+import '../utils/formatters.dart';
 
 class AddExpenseScreen extends StatefulWidget {
   const AddExpenseScreen({super.key});
@@ -50,7 +51,7 @@ class _AddExpenseScreenState extends State<AddExpenseScreen> {
       await _db.insererDepense(Depense(
         motoId: _motoId!,
         categorieId: _categorieId!,
-        montant: double.parse(_montantCtrl.text.replaceAll(' ', '')),
+        montant: lireMontant(_montantCtrl.text)!,
         date: _date,
         description: _descriptionCtrl.text.trim().isEmpty ? null : _descriptionCtrl.text.trim(),
       ));
@@ -95,7 +96,7 @@ class _AddExpenseScreenState extends State<AddExpenseScreen> {
               controller: _montantCtrl,
               decoration: const InputDecoration(labelText: 'Montant'),
               keyboardType: TextInputType.number,
-              validator: (v) => (double.tryParse(v ?? '') == null) ? 'Montant invalide' : null,
+              validator: (v) => lireMontant(v) == null ? 'Montant invalide' : null,
             ),
             const SizedBox(height: 12),
             ListTile(
