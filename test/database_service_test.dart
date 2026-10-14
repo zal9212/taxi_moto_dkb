@@ -139,6 +139,107 @@ void main() {
     });
   });
 
+  group('changement du montant de versement', () {
+    Future<Map<int, double>> montantsParJour(int motoId) async =>
+        {for (final v in await db.listerVersementsParMoto(motoId)) v.dateEcheance.day: v.montantPrevu};
+
+    test('applique depuis sa date de mise en vigueur, meme aux periodes passees ou payees', () async {
+      final motoId = await nouvelleMoto();
+      Future<void> echeance(int jour, String statut, {double? paye}) => db.insererVersement(Versement(
+          motoId: motoId, dateEcheance: DateTime(2026, 9, jour), montantPrevu: 50000, montantPaye: paye, statut: statut));
+      await echeance(7, AppConstants.versementPaye, paye: 50000); // avant la date : ancien montant
+      await echeance(14, AppConstants.versementPaye, paye: 50000); // payee a l'ancien montant
+      await echeance(15, AppConstants.versementPaye); // ancien import : payee sans montant
+      await echeance(21, AppConstants.versementEnRetard);
+      await echeance(28, AppConstants.versementEnDette); // la dette garde son montant
+      await echeance(30, AppConstants.versementEnAttente);
+
+      expect(await db.changerMontant(motoId, 60000, DateTime(2026, 9, 14, 15, 30)), 4);
+
+      expect(await montantsParJour(motoId), {7: 50000, 14: 60000, 15: 60000, 21: 60000, 28: 50000, 30: 60000});
+      final parJour = {for (final v in await db.listerVersementsParMoto(motoId)) v.dateEcheance.day: v};
+      expect(parJour[14]!.montantPaye, 50000); // reste 10000 a payer sur cette periode
+      expect(parJour[15]!.montantPaye, 50000);
+      expect(await db.listerChangementsMontant(motoId), [(depuis: DateTime(2026, 9, 14), montant: 60000.0)]);
+      // Le montant de depart de la moto ne bouge pas.
+      expect((await db.obtenirMoto(motoId))!.montantVersement, 50000);
+    });
+
+    test('chaque changement s\'arrete au suivant ; annuler un changement rend le montant d\'avant', () async {
+      final motoId = await nouvelleMoto();
+      for (final jour in [7, 14, 21, 28]) {
+        await db.insererVersement(Versement(
+            motoId: motoId, dateEcheance: DateTime(2026, 9, jour), montantPrevu: 50000,
+            statut: AppConstants.versementEnRetard));
+      }
+
+      await db.changerMontant(motoId, 70000, DateTime(2026, 9, 21));
+      await db.changerMontant(motoId, 60000, DateTime(2026, 9, 14)); // saisi apres, mais plus tot
+      expect(await montantsParJour(motoId), {7: 50000, 14: 60000, 21: 70000, 28: 70000});
+
+      await db.changerMontant(motoId, 65000, DateTime(2026, 9, 14)); // meme jour : remplace
+      expect(await montantsParJour(motoId), {7: 50000, 14: 65000, 21: 70000, 28: 70000});
+      expect((await db.listerChangementsMontant(motoId)).map((c) => c.montant), [65000, 70000]);
+
+      await db.supprimerChangementMontant(motoId, DateTime(2026, 9, 21));
+      expect(await montantsParJour(motoId), {7: 50000, 14: 65000, 21: 65000, 28: 65000});
+
+      await db.supprimerChangementMontant(motoId, DateTime(2026, 9, 14));
+      expect(await montantsParJour(motoId), {7: 50000, 14: 50000, 21: 50000, 28: 50000});
+      expect(await db.listerChangementsMontant(motoId), isEmpty);
+    });
+
+    test('changement prevu : les echeances creees plus tard prennent le montant de leur date', () async {
+      final aujourdHui = DateTime.now();
+      final debut = DateTime(aujourdHui.year, aujourdHui.month, aujourdHui.day);
+      final moto = Moto(
+        nom: 'Moto 1',
+        chauffeur: 'Mamadou',
+        montantVersement: 50000,
+        frequenceType: AppConstants.freqHebdomadaire,
+        frequenceValeur: debut.weekday,
+        dateDebut: debut,
+      );
+      final motoId = await db.insererMoto(moto);
+      await db.changerMontant(motoId, 60000, DateTime(debut.year, debut.month, debut.day + 14));
+
+      await db.assurerEcheances(moto.copyWith(id: motoId));
+
+      final versements = (await db.listerVersementsParMoto(motoId)).reversed;
+      expect(versements.map((v) => v.montantPrevu), [50000, 50000, 60000, 60000]);
+    });
+
+    test('l\'historique suit l\'export Excel et revient a l\'import ; supprime avec la moto', () async {
+      final motoId = await nouvelleMoto();
+      await db.changerMontant(motoId, 60000, DateTime(2026, 9, 14));
+      await db.changerMontant(motoId, 65000.5, DateTime(2027, 1, 1));
+      final dossier = await Directory.systemTemp.createTemp('montants_test');
+      addTearDown(() => dossier.delete(recursive: true));
+      final chemin = '${dossier.path}/export.xlsx';
+      await File(chemin).writeAsBytes(await ExcelService.classeurComplet());
+
+      final rapport = await ExcelService.importer(chemin, remplacementComplet: true);
+
+      expect(rapport.erreurs, isEmpty);
+      final importee = (await db.listerMotos()).single;
+      expect(importee.montantVersement, 50000);
+      expect(await db.listerChangementsMontant(importee.id!), [
+        (depuis: DateTime(2026, 9, 14), montant: 60000.0),
+        (depuis: DateTime(2027, 1, 1), montant: 65000.5),
+      ]);
+
+      await db.supprimerMoto(importee.id!);
+      final restants = await (await db.database).query('montants_moto');
+      expect(restants, isEmpty);
+    });
+
+    test('une base v8 recoit la table de l\'historique des montants', () async {
+      await ancienneBase(8, sql: [...tablesV3, 'CREATE TABLE motos (id INTEGER PRIMARY KEY)']);
+
+      expect(await colonnes('montants_moto'), ['moto_id', 'depuis', 'montant']);
+    });
+  });
+
   group('comptes par personne dans une entite (proprietaire + gerants)', () {
     Future<void> operation(int entiteId, String type, double montant, {int? gerantId}) =>
         db.insererTransactionCategorie(CategorieTransaction(

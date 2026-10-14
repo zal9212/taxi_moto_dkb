@@ -2,6 +2,10 @@ import '../core/constants.dart';
 import '../models/moto.dart';
 import '../models/versement.dart';
 
+/// Changement du montant de versement d'une moto : [montant] s'applique a
+/// partir du jour [depuis], jusqu'au changement suivant.
+typedef ChangementMontant = ({DateTime depuis, double montant});
+
 /// Calcule les dates d'échéance des versements d'une moto à partir de sa
 /// configuration (fréquence hebdomadaire / mensuelle / personnalisée).
 /// Les versements sont récurrents et indéfinis (pas de montant total à
@@ -134,6 +138,19 @@ class ScheduleService {
     ];
   }
 
+  /// Montant du versement en vigueur le jour [d] : celui du dernier
+  /// changement date au plus tard ce jour-la, sinon le montant de depart de
+  /// la moto ([Moto.montantVersement]). [changements] : du plus ancien au
+  /// plus recent.
+  static double montantAu(Moto moto, List<ChangementMontant> changements, DateTime d) {
+    var montant = moto.montantVersement;
+    for (final c in changements) {
+      if (c.depuis.isAfter(dateSeule(d))) break;
+      montant = c.montant;
+    }
+    return montant;
+  }
+
   /// Ce qui reste dû sur une échéance (0 si payée en entier ou passée en
   /// dette). Une échéance "payée" sans montant enregistré (ancien import)
   /// compte comme soldée : on ne redemande jamais un paiement déjà fait.
@@ -152,6 +169,7 @@ class ScheduleService {
     required List<Versement> existants,
     required Moto moto,
     required DateTime aujourdHui,
+    List<ChangementMontant> changements = const [],
   }) {
     String etat(Versement v) => v.statut == AppConstants.versementPaye
         ? 'partiel'
@@ -168,7 +186,7 @@ class ScheduleService {
         valeur: moto.frequenceValeur,
         aujourdHui: aujourdHui,
       ))
-        (date: d, etat: 'manquante', reste: moto.montantVersement),
+        (date: d, etat: 'manquante', reste: montantAu(moto, changements, d)),
     ]..sort((a, b) => a.date.compareTo(b.date));
     return periodes;
   }
@@ -203,8 +221,10 @@ class ScheduleService {
   /// - [depuisDateDebut] (la date de début a changé) : la suite repart de
   ///   cette date. Plus tôt, les échéances oubliées du début sont ajoutées
   ///   (ex: 2 versements jamais donnés) ; plus tard, seul l'avenir bouge.
-  /// - sinon (fréquence, jour ou montant) : le changement prend effet au
-  ///   prochain versement prévu.
+  /// - sinon (fréquence ou jour) : le changement prend effet au prochain
+  ///   versement prévu.
+  /// Un nouveau montant ne passe pas par ici : voir
+  /// DatabaseService.changerMontant.
   static ({List<Versement> aSupprimer, List<DateTime> aCreer}) replanifier({
     required List<Versement> existants,
     required Moto moto,

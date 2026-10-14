@@ -40,8 +40,28 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
   /// la frequence (voir [_majDateParDefaut]).
   bool _dateDebutChoisie = false;
   String _statut = AppConstants.motoActive;
+  /// Date a partir de laquelle un nouveau montant de versement s'applique
+  /// (voir [DatabaseService.changerMontant]).
+  DateTime _montantDepuis = ScheduleService.aujourdHui();
+  /// Changements de montant deja enregistres (passes et prevus).
+  List<ChangementMontant> _changements = [];
+  /// Montant en vigueur aujourd'hui (en edition) : celui qu'affiche le champ.
+  double? _montantActuel;
 
   bool get _modeEdition => widget.motoExistante != null;
+
+  bool get _montantChange {
+    final montant = lireMontant(_montantVersementCtrl.text);
+    return _modeEdition && montant != null && montant != _montantActuel;
+  }
+
+  /// Changement deja prevu apres [jour] : le nouveau montant s'arrete la.
+  ChangementMontant? _changementApres(DateTime jour) {
+    for (final c in _changements) {
+      if (c.depuis.isAfter(jour)) return c;
+    }
+    return null;
+  }
   bool _enregistrement = false;
 
   @override
@@ -60,6 +80,8 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
       _dateDebut = ScheduleService.dateSeule(m.dateDebut);
       _dateDebutChoisie = true;
       _statut = m.statut;
+      _montantActuel = m.montantVersement;
+      _chargerChangements();
       switch (m.frequenceType) {
         case AppConstants.freqHebdomadaire:
           _jourSemaine = m.frequenceValeur;
@@ -72,6 +94,45 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
           break;
       }
     }
+  }
+
+  /// Le champ montant affiche le montant en vigueur aujourd'hui, pas le
+  /// montant de depart de la moto.
+  Future<void> _chargerChangements() async {
+    final m = widget.motoExistante!;
+    final changements = await _db.listerChangementsMontant(m.id!);
+    if (!mounted) return;
+    final actuel = ScheduleService.montantAu(m, changements, ScheduleService.aujourdHui());
+    setState(() {
+      // Ne pas ecraser un montant deja tape entre-temps.
+      if (lireMontant(_montantVersementCtrl.text) == _montantActuel) {
+        _montantVersementCtrl.text = actuel.toStringAsFixed(0);
+      }
+      _changements = changements;
+      _montantActuel = actuel;
+    });
+  }
+
+  /// Annule tout de suite un changement de montant (saisi par erreur, ou
+  /// prevu et abandonne) : sa periode reprend le montant d'avant.
+  Future<void> _supprimerChangement(ChangementMontant c) async {
+    final confirme = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Annuler ce changement ?'),
+        content: Text('Le passage a ${c.montant.toStringAsFixed(0)} du ${formaterDate(c.depuis)} sera annule '
+            'tout de suite : ses echeances reprennent le montant d\'avant et le solde sera recalcule.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Garder')),
+          ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('Annuler le changement')),
+        ],
+      ),
+    );
+    if (confirme != true) return;
+    final moto = widget.motoExistante!;
+    await _db.supprimerChangementMontant(moto.id!, c.depuis);
+    await _planifierNotifications(moto);
+    await _chargerChangements();
   }
 
   int get _frequenceValeur {
@@ -110,7 +171,9 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
         id: widget.motoExistante?.id,
         nom: _nomCtrl.text.trim(),
         chauffeur: _chauffeurCtrl.text.trim(),
-        montantVersement: montantVersement,
+        // En edition, le montant de depart ne change pas : un nouveau
+        // montant s'enregistre dans l'historique (voir plus bas).
+        montantVersement: widget.motoExistante?.montantVersement ?? montantVersement,
         frequenceType: _frequenceType,
         frequenceValeur: _frequenceValeur,
         dateDebut: _dateDebut,
@@ -127,8 +190,10 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
       } else {
         final ancien = widget.motoExistante!;
         final dateDebutChangee = !DateUtils.isSameDay(ancien.dateDebut, _dateDebut);
+        final montantChange = _montantChange;
+        // Le montant ne replanifie rien : il s'applique depuis sa date de
+        // mise en vigueur (voir [DatabaseService.changerMontant]).
         final planChange = dateDebutChangee ||
-            ancien.montantVersement != montantVersement ||
             ancien.frequenceType != _frequenceType ||
             ancien.frequenceValeur != _frequenceValeur;
         final active = _statut == AppConstants.motoActive;
@@ -139,8 +204,8 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
         // la fiche moto.
         final replanifier = active && planChange && (dateDebutChangee || !reactivee);
 
+        final messages = <String>[];
         if (replanifier) {
-          final String message;
           if (dateDebutChangee) {
             // Apercu exact de ce qui sera ajoute (meme calcul que l'enregistrement).
             final plan = ScheduleService.replanifier(
@@ -150,16 +215,26 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
               aujourdHui: ScheduleService.aujourdHui(),
             );
             final passees = plan.aCreer.where((d) => d.isBefore(ScheduleService.aujourdHui())).toList();
-            message = '${passees.isEmpty ? '' : '${passees.length} echeance(s) passee(s) seront ajoutee(s) en retard : '
+            messages.add('${passees.isEmpty ? '' : '${passees.length} echeance(s) passee(s) seront ajoutee(s) en retard : '
                 '${passees.map(formaterDate).join(', ')}.\n\n'}'
                 'Les echeances a venir suivront la frequence a partir du ${formaterDate(_dateDebut)}. '
-                'Aucun versement paye, retard ou dette ne sera supprime.';
+                'Aucun versement paye, retard ou dette ne sera supprime.');
           } else {
-            message = 'Le changement prendra effet au prochain versement prevu. Les versements '
-                'deja payes, les retards et les dettes ne changent pas.';
+            messages.add('Le changement de frequence prendra effet au prochain versement prevu. Les versements '
+                'deja payes, les retards et les dettes ne changent pas.');
           }
+        }
+        if (montantChange) {
+          final suivant = _changementApres(_montantDepuis);
+          messages.add('Le versement passe a ${montantVersement.toStringAsFixed(0)} a partir du '
+              '${formaterDate(_montantDepuis)}'
+              '${suivant == null ? '' : ', jusqu\'au ${formaterDate(suivant.depuis)} (changement deja prevu)'}. '
+              'Les echeances de cette periode prennent ce montant, meme celles deja passees ou payees : '
+              'le solde sera recalcule. Les echeances d\'avant et les dettes ne changent pas.');
+        }
+        if (messages.isNotEmpty) {
           if (!mounted) return;
-          final confirme = await _confirmerReplanification(message);
+          final confirme = await _confirmerReplanification(messages.join('\n\n'));
           if (!confirme) {
             if (mounted) setState(() => _enregistrement = false);
             return;
@@ -167,6 +242,9 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
         }
 
         await _db.modifierMoto(moto);
+        // Avant la replanification : les echeances recreees prennent le
+        // montant en vigueur a leur date, nouveau changement compris.
+        if (montantChange) await _db.changerMontant(moto.id!, montantVersement, _montantDepuis);
         if (replanifier || reactivee) {
           await _annulerRappelsNonPayes(moto.id!);
           if (replanifier) {
@@ -257,7 +335,43 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
                 decoration: const InputDecoration(labelText: 'Montant par versement'),
                 keyboardType: TextInputType.number,
                 validator: (v) => lireMontant(v) == null ? 'Montant invalide' : null,
+                onChanged: (_) => setState(() {}),
               ),
+              if (_montantChange)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Nouveau montant en vigueur depuis le', style: TextStyle(fontSize: 13)),
+                  subtitle: Text(formaterDate(_montantDepuis)),
+                  trailing: const Icon(Icons.calendar_today_outlined, size: 18),
+                  onTap: () async {
+                    // Passee (oubli de le faire le jour meme) ou future (changement prevu).
+                    final choisie = await showDatePicker(
+                      context: context,
+                      initialDate: _montantDepuis,
+                      firstDate: DateTime(2020),
+                      lastDate: DateTime(2100),
+                    );
+                    if (choisie != null) setState(() => _montantDepuis = ScheduleService.dateSeule(choisie));
+                  },
+                ),
+              if (_changements.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                const Text('Changements de montant', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+                Text('Depart : ${widget.motoExistante!.montantVersement.toStringAsFixed(0)}',
+                    style: TextStyle(color: AppColors.texteGris, fontSize: 12)),
+                for (final c in _changements)
+                  ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    title: Text('A partir du ${formaterDate(c.depuis)} : ${c.montant.toStringAsFixed(0)}'
+                        '${c.depuis.isAfter(ScheduleService.aujourdHui()) ? ' (prevu)' : ''}'),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.delete_outline, size: 20),
+                      tooltip: 'Annuler ce changement',
+                      onPressed: () => _supprimerChangement(c),
+                    ),
+                  ),
+              ],
               const SizedBox(height: 20),
               const Text('Frequence de versement', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
               const SizedBox(height: 8),

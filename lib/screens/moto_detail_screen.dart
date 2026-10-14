@@ -28,6 +28,7 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
   final _db = DatabaseService.instance;
   Moto? _moto;
   List<Versement> _versements = [];
+  List<ChangementMontant> _changementsMontant = [];
   double _totalVerse = 0;
   /// Part de la caisse venant des remboursements de dettes liees a la moto.
   double _remboursementsDettes = 0;
@@ -62,6 +63,7 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     }
 
     final versements = await _db.listerVersementsParMoto(widget.motoId);
+    final changementsMontant = await _db.listerChangementsMontant(widget.motoId);
     final totalVerse = await _db.totalEncaisse(motoId: widget.motoId);
     final remboursementsDettes = await _db.totalRemboursementsMotos(motoId: widget.motoId);
     final solde = await _db.soldeNet(motoId: widget.motoId);
@@ -76,6 +78,7 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     setState(() {
       _moto = moto;
       _versements = versements;
+      _changementsMontant = changementsMontant;
       _totalVerse = totalVerse;
       _remboursementsDettes = remboursementsDettes;
       _solde = solde;
@@ -158,6 +161,7 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
         existants: _versements,
         moto: _moto!,
         aujourdHui: ScheduleService.aujourdHui(),
+        changements: _changementsMontant,
       );
 
   /// Periodes deja passees et pas soldees (ce que le chauffeur doit).
@@ -284,7 +288,10 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     if (_moto == null) return;
     final depenses = await _db.listerDepensesParMoto(widget.motoId);
     await PdfService.genererEtPartagerReleve(
-      moto: _moto!,
+      // Le releve affiche le montant en vigueur aujourd'hui.
+      moto: _moto!.copyWith(
+          montantVersement:
+              ScheduleService.montantAu(_moto!, _changementsMontant, ScheduleService.aujourdHui())),
       versements: _versements,
       depenses: depenses,
       deviseSymbole: _devise,

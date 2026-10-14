@@ -140,6 +140,20 @@ class DatabaseService {
     await _creerTableDevises(db);
     await db.insert('devises', {'code': AppConstants.devisePardDefaut});
     await _creerTablePaiements(db);
+    await _creerTableMontantsMoto(db);
+  }
+
+  /// Historique des changements du montant de versement d'une moto (voir
+  /// [changerMontant]). [motos.montant_versement] reste le montant de depart.
+  Future<void> _creerTableMontantsMoto(Database db) async {
+    await db.execute('''
+      CREATE TABLE montants_moto (
+        moto_id INTEGER NOT NULL,
+        depuis TEXT NOT NULL,
+        montant REAL NOT NULL,
+        PRIMARY KEY (moto_id, depuis)
+      )
+    ''');
   }
 
   /// Journal des paiements : une ligne par somme recue, a sa vraie date.
@@ -253,6 +267,12 @@ class DatabaseService {
       // Les operations existantes restent au proprietaire (gerant_id null).
       await db.execute('ALTER TABLE categorie_transactions ADD COLUMN gerant_id INTEGER');
       await _creerTablesGerantsEtAudios(db);
+    }
+
+    if (oldVersion < 9) {
+      // v9 : historique des montants de versement. Purement additif : sans
+      // changement, le montant de la moto s'applique partout comme avant.
+      await _creerTableMontantsMoto(db);
     }
   }
 
@@ -417,6 +437,7 @@ class DatabaseService {
       await txn.delete('paiements', where: 'moto_id = ?', whereArgs: [id]);
       await txn.delete('versements', where: 'moto_id = ?', whereArgs: [id]);
       await txn.delete('depenses', where: 'moto_id = ?', whereArgs: [id]);
+      await txn.delete('montants_moto', where: 'moto_id = ?', whereArgs: [id]);
       await txn.delete('motos', where: 'id = ?', whereArgs: [id]);
     });
   }
@@ -432,6 +453,7 @@ class DatabaseService {
       await txn.delete('paiements');
       await txn.delete('versements');
       await txn.delete('depenses');
+      await txn.delete('montants_moto');
       await txn.delete('motos');
     });
   }
@@ -934,12 +956,12 @@ class DatabaseService {
       valeur: moto.frequenceValeur,
       aujourdHui: ScheduleService.aujourdHui(),
     );
-    if (dates.isNotEmpty) await insererVersements(_nouvellesEcheances(moto, dates));
+    if (dates.isNotEmpty) await insererVersements(await _nouvellesEcheances(moto, dates));
     return dates.length;
   }
 
   /// Applique une modification du plan d'une moto (date de début,
-  /// fréquence, jour ou montant) à ses échéances non payées — voir
+  /// fréquence ou jour) à ses échéances non payées — voir
   /// [ScheduleService.replanifier] pour les règles. Les versements déjà
   /// payés ne sont jamais touchés.
   Future<void> replanifierEcheances(Moto moto, {required bool depuisDateDebut}) =>
@@ -953,7 +975,101 @@ class DatabaseService {
       depuisDateDebut: depuisDateDebut,
       aujourdHui: ScheduleService.aujourdHui(),
     );
-    await _remplacerEcheances(plan.aSupprimer, _nouvellesEcheances(moto, plan.aCreer));
+    await _remplacerEcheances(plan.aSupprimer, await _nouvellesEcheances(moto, plan.aCreer));
+  }
+
+  /// Changements de montant d'une moto, du plus ancien au plus recent (voir
+  /// [ScheduleService.montantAu]).
+  Future<List<ChangementMontant>> listerChangementsMontant(int motoId) async {
+    final db = await database;
+    final lignes = await db.query('montants_moto', where: 'moto_id = ?', whereArgs: [motoId], orderBy: 'depuis ASC');
+    return [
+      for (final l in lignes) (depuis: DateTime.parse(l['depuis'] as String), montant: (l['montant'] as num).toDouble()),
+    ];
+  }
+
+  /// Nouveau montant de versement en vigueur a partir du jour [depuis]
+  /// (passe ou futur), jusqu'au changement suivant s'il y en a un. Les
+  /// echeances deja creees sur cette periode passent a ce montant, meme
+  /// passees ou payees (payee a l'ancien montant, elle devient partielle ou
+  /// en avance, et le solde se recalcule) ; celles creees plus tard, et les
+  /// periodes oubliees encaissees apres coup, prennent le montant en vigueur
+  /// a leur date. Un changement au meme jour qu'un autre le remplace.
+  /// Retourne le nombre d'echeances modifiees.
+  Future<int> changerMontant(int motoId, double montant, DateTime depuis) => _enFile(() async {
+        final db = await database;
+        return db.transaction((txn) async {
+          await txn.insert(
+            'montants_moto',
+            {'moto_id': motoId, 'depuis': ScheduleService.dateSeule(depuis).toIso8601String(), 'montant': montant},
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
+          return _reappliquerMontant(txn, motoId, depuis);
+        });
+      });
+
+  /// Annule le changement de montant du jour [depuis] : sa periode reprend
+  /// le montant d'avant (changement precedent, ou montant de depart).
+  Future<int> supprimerChangementMontant(int motoId, DateTime depuis) => _enFile(() async {
+        final db = await database;
+        return db.transaction((txn) async {
+          await txn.delete('montants_moto',
+              where: 'moto_id = ? AND depuis = ?',
+              whereArgs: [motoId, ScheduleService.dateSeule(depuis).toIso8601String()]);
+          return _reappliquerMontant(txn, motoId, depuis);
+        });
+      });
+
+  /// Remplace tout l'historique des montants d'une moto (import Excel), sans
+  /// toucher aux echeances : elles arrivent avec leur propre montant.
+  Future<void> remplacerChangementsMontant(int motoId, List<ChangementMontant> changements) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.delete('montants_moto', where: 'moto_id = ?', whereArgs: [motoId]);
+      for (final c in changements) {
+        await txn.insert(
+          'montants_moto',
+          {'moto_id': motoId, 'depuis': ScheduleService.dateSeule(c.depuis).toIso8601String(), 'montant': c.montant},
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+    });
+  }
+
+  /// Remet au montant en vigueur le jour [depuis] les echeances de la periode
+  /// qui commence ce jour-la et s'arrete au changement suivant. Les
+  /// echeances passees en dette ne bougent pas (la dette a son montant).
+  Future<int> _reappliquerMontant(Transaction txn, int motoId, DateTime depuis) async {
+    final jour = ScheduleService.dateSeule(depuis).toIso8601String();
+    final montant = (await txn.rawQuery(
+      'SELECT COALESCE('
+      '(SELECT montant FROM montants_moto WHERE moto_id = ? AND depuis <= ? ORDER BY depuis DESC LIMIT 1), '
+      '(SELECT montant_versement FROM motos WHERE id = ?)) AS montant',
+      [motoId, jour, motoId],
+    ))
+        .first['montant'] as num?;
+    if (montant == null) return 0; // moto inconnue
+    final suivant = (await txn.rawQuery(
+      'SELECT MIN(depuis) AS depuis FROM montants_moto WHERE moto_id = ? AND depuis > ?',
+      [motoId, jour],
+    ))
+        .first['depuis'] as String?;
+    // Payee sans montant enregistre (ancien import) = payee a l'ancien
+    // montant : on le fige avant de changer montant_prevu.
+    return txn.rawUpdate(
+      'UPDATE versements SET '
+      'montant_paye = COALESCE(montant_paye, CASE WHEN statut = ? THEN montant_prevu END), '
+      'montant_prevu = ? '
+      'WHERE moto_id = ? AND statut != ? AND date_echeance >= ?${suivant != null ? ' AND date_echeance < ?' : ''}',
+      [
+        AppConstants.versementPaye,
+        montant,
+        motoId,
+        AppConstants.versementEnDette,
+        jour,
+        if (suivant != null) suivant,
+      ],
+    );
   }
 
   /// A appeler quand une moto est reactivee apres une pause (suspension).
@@ -980,7 +1096,7 @@ class DatabaseService {
       valeur: moto.frequenceValeur,
       aujourdHui: aujourdHui,
     );
-    await _remplacerEcheances(existants.where(deLaPause).toList(), _nouvellesEcheances(moto, dates));
+    await _remplacerEcheances(existants.where(deLaPause).toList(), await _nouvellesEcheances(moto, dates));
   }
 
   /// "Encaisser un versement" : le montant recu est reparti sur les periodes
@@ -992,8 +1108,10 @@ class DatabaseService {
   Future<List<({DateTime date, double montant})>> encaisser(Moto moto, double montant) => _enFile(() async {
         final existants = await listerVersementsParMoto(moto.id!);
         final aujourdHui = ScheduleService.aujourdHui();
+        final changements = await listerChangementsMontant(moto.id!);
         final affectations = ScheduleService.repartirPaiement(
-          ScheduleService.periodesAPayer(existants: existants, moto: moto, aujourdHui: aujourdHui),
+          ScheduleService.periodesAPayer(
+              existants: existants, moto: moto, aujourdHui: aujourdHui, changements: changements),
           montant,
         );
         final maintenant = DateTime.now();
@@ -1007,7 +1125,7 @@ class DatabaseService {
               motoId: moto.id!,
               dateEcheance: a.date,
               dateValidation: maintenant,
-              montantPrevu: moto.montantVersement,
+              montantPrevu: ScheduleService.montantAu(moto, changements, a.date),
               montantPaye: a.montant,
               statut: AppConstants.versementPaye,
             ));
@@ -1048,16 +1166,18 @@ class DatabaseService {
     });
   }
 
-  /// Echeances a inserer pour ces dates, deja "en retard" si leur jour est
-  /// passe (meme regle que [actualiserRetards]).
-  List<Versement> _nouvellesEcheances(Moto moto, List<DateTime> dates) {
+  /// Echeances a inserer pour ces dates, au montant en vigueur a chacune,
+  /// deja "en retard" si leur jour est passe (meme regle que [actualiserRetards]).
+  Future<List<Versement>> _nouvellesEcheances(Moto moto, List<DateTime> dates) async {
+    if (dates.isEmpty) return [];
+    final changements = await listerChangementsMontant(moto.id!);
     final aujourdHui = ScheduleService.aujourdHui();
     return [
       for (final d in dates)
         Versement(
           motoId: moto.id!,
           dateEcheance: d,
-          montantPrevu: moto.montantVersement,
+          montantPrevu: ScheduleService.montantAu(moto, changements, d),
           statut: d.isBefore(aujourdHui) ? AppConstants.versementEnRetard : AppConstants.versementEnAttente,
         ),
     ];

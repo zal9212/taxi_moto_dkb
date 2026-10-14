@@ -172,8 +172,11 @@ class ExcelService {
       TextCellValue('Date debut'),
       TextCellValue('Statut'),
       TextCellValue('Notes'),
+      // En derniere position : les anciens fichiers restent importables.
+      TextCellValue('Changements de montant'),
     ]);
     for (final m in motos) {
+      final changements = m.id == null ? <ChangementMontant>[] : await db.listerChangementsMontant(m.id!);
       sMotos.appendRow([
         m.id != null ? IntCellValue(m.id!) : null,
         TextCellValue(m.nom),
@@ -184,6 +187,7 @@ class ExcelService {
         TextCellValue(_iso(m.dateDebut)),
         TextCellValue(m.statut),
         m.notes != null ? TextCellValue(m.notes!) : null,
+        changements.isEmpty ? null : TextCellValue(_ecrireChangements(changements)),
       ]);
     }
 
@@ -421,6 +425,12 @@ class ExcelService {
         final dateDebutTxt = _texte(_valeur(ligne, 6));
         final statut = _texte(_valeur(ligne, 7)) ?? AppConstants.motoActive;
         final notes = _texte(_valeur(ligne, 8));
+        final changements = _lireChangements(_texte(_valeur(ligne, 9)));
+        if (changements == null) {
+          rapport.erreurs.add(LigneErreurImport(_feuilleMotos, numeroLigne,
+              'Changements de montant invalides (attendu : 2026-09-14:60000; 2026-12-01:65000).'));
+          continue;
+        }
 
         if (nom == null ||
             chauffeur == null ||
@@ -482,6 +492,9 @@ class ExcelService {
           idFinal = await db.insererMoto(moto);
           rapport.motosCreees++;
         }
+        // Le fichier fait foi : une colonne vide (ou absente d'un ancien
+        // fichier) laisse le seul montant de la ligne.
+        await db.remplacerChangementsMontant(idFinal, changements);
         idMotoParNom[nom.toLowerCase()] = idFinal;
         final idFichier = idTxte != null ? int.tryParse(idTxte) : null;
         if (idFichier != null) idMotoFichierVersDb[idFichier] = idFinal;
@@ -1637,6 +1650,28 @@ class ExcelService {
   }
 
   static String _iso(DateTime d) => d.toIso8601String().substring(0, 10);
+
+  /// "2026-09-14:60000; 2026-12-01:65000" (colonne "Changements de montant").
+  static String _ecrireChangements(List<ChangementMontant> changements) =>
+      changements.map((c) {
+        final m = c.montant;
+        return '${_iso(c.depuis)}:${m == m.roundToDouble() ? m.toStringAsFixed(0) : m}';
+      }).join('; ');
+
+  /// Inverse de [_ecrireChangements], trie par date ; liste vide si la
+  /// cellule est vide, null si elle est mal ecrite.
+  static List<ChangementMontant>? _lireChangements(String? texte) {
+    final changements = <ChangementMontant>[];
+    for (final morceau in (texte ?? '').split(';')) {
+      if (morceau.trim().isEmpty) continue;
+      final parties = morceau.split(':');
+      final date = parties.length == 2 ? DateTime.tryParse(parties[0].trim()) : null;
+      final montant = parties.length == 2 ? double.tryParse(parties[1].trim()) : null;
+      if (date == null || montant == null) return null;
+      changements.add((depuis: ScheduleService.dateSeule(date), montant: montant));
+    }
+    return changements..sort((a, b) => a.depuis.compareTo(b.depuis));
+  }
 
   static String _isoCompact(DateTime d) {
     String deuxChiffres(int n) => n.toString().padLeft(2, '0');

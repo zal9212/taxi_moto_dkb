@@ -229,6 +229,37 @@ void main() {
       expect(periodes.map((p) => p.reste), [20000, 50000, 50000, 50000]);
     });
 
+    test('montant en vigueur : depart avant le 1er changement, puis chaque changement jusqu\'au suivant', () {
+      final m = moto(hebdo, DateTime.monday);
+      final changements = [
+        (depuis: DateTime(2026, 9, 14), montant: 60000.0),
+        (depuis: DateTime(2026, 12, 1), montant: 65000.0), // prevu
+      ];
+      double au(DateTime d) => ScheduleService.montantAu(m, changements, d);
+
+      expect(au(DateTime(2026, 9, 13, 23)), 50000);
+      expect(au(DateTime(2026, 9, 14, 8)), 60000); // l'heure ne compte pas
+      expect(au(DateTime(2026, 11, 30)), 60000);
+      expect(au(DateTime(2027, 1, 1)), 65000);
+      expect(ScheduleService.montantAu(m, const [], DateTime(2027)), 50000);
+    });
+
+    test('periode oubliee : comptee au montant en vigueur a sa date, pas au montant du jour', () {
+      final periodes = ScheduleService.periodesAPayer(
+        existants: [echeance(DateTime(2026, 9, 7), paye), echeance(DateTime(2026, 9, 28), enRetard)],
+        moto: moto(hebdo, DateTime.monday, dateDebut: DateTime(2026, 9, 7)),
+        aujourdHui: aujourdHui,
+        changements: [(depuis: DateTime(2026, 9, 21), montant: 60000.0)],
+      );
+
+      // 14/09 (avant le changement) et 21/09 (apres) n'ont jamais eu d'echeance.
+      expect(periodes.map((p) => (p.date, p.etat, p.reste)), [
+        (DateTime(2026, 9, 14), 'manquante', 50000),
+        (DateTime(2026, 9, 21), 'manquante', 60000),
+        (DateTime(2026, 9, 28), 'en retard', 50000),
+      ]);
+    });
+
     test('repartition : la plus ancienne periode est payee d\'abord, le reste passe a la suivante', () {
       final periodes = [
         (date: DateTime(2026, 9, 14), etat: 'en retard', reste: 50000.0),
