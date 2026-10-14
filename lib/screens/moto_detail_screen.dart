@@ -89,7 +89,68 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
   }
 
 
+  /// Regle du client : toujours la plus ancienne d'abord. Les semaines
+  /// [impayees] d'avant doivent etre payees, ou, si elles sont deja
+  /// passees, mises en dette (elles restent visibles dans la fiche et dans
+  /// Dettes, a marquer payees plus tard). Retourne 'dette', 'payer' ou null.
+  Future<String?> _demanderSemainesAnterieures(List<({DateTime date, String etat, double reste})> impayees,
+      {required bool payerDAbord}) {
+    final aujourdHui = ScheduleService.aujourdHui();
+    final detteImpossible = impayees.any((p) => !p.date.isBefore(aujourdHui));
+    return showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Semaines anterieures impayees'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('On paie toujours la plus ancienne d\'abord.'),
+            const SizedBox(height: 8),
+            for (final p in impayees)
+              Text('${formaterDate(p.date)} : ${formaterMontant(p.reste, _devise)}',
+                  style: const TextStyle(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8),
+            Text(
+              detteImpossible
+                  ? 'Ce versement les paiera d\'abord.'
+                  : 'Les passer en dette ? Elles restent visibles dans la fiche et dans Dettes, '
+                      'a marquer payees plus tard.',
+              style: TextStyle(color: AppColors.texteGris, fontSize: 12),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Annuler')),
+          if (payerDAbord)
+            TextButton(onPressed: () => Navigator.pop(context, 'payer'), child: const Text('Payer d\'abord celles-ci')),
+          if (!detteImpossible)
+            ElevatedButton(onPressed: () => Navigator.pop(context, 'dette'), child: const Text('Passer en dette')),
+        ],
+      ),
+    );
+  }
+
   Future<void> _validerVersement(Versement v) async {
+    final moto = _moto;
+    if (moto == null) return;
+    final anterieures = ScheduleService.impayeesAvant(
+        existants: _versements, moto: moto, aujourdHui: ScheduleService.aujourdHui(), date: v.dateEcheance);
+    var payeesDAbord = false;
+    if (anterieures.isNotEmpty) {
+      final choix = await _demanderSemainesAnterieures(anterieures, payerDAbord: true);
+      if (choix == null) return;
+      if (choix == 'dette') {
+        for (final p in anterieures) {
+          final ancienne = _versements.firstWhere((x) =>
+              ScheduleService.dateSeule(x.dateEcheance) == p.date && x.statut != AppConstants.versementEnDette);
+          await _db.marquerEnDette(ancienne, moto);
+        }
+      } else {
+        payeesDAbord = true;
+      }
+    }
+    if (!mounted) return;
     final controleur = TextEditingController(text: v.montantPrevu.toStringAsFixed(0));
     final confirme = await showDialog<bool>(
       context: context,
@@ -133,6 +194,42 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     await _db.validerVersement(v.id!, montantPaye: montant);
     if (v.id != null) await NotificationService.annulerRappel(v.id!);
     // _charger() complete les echeances (et leurs rappels) si la moto est active.
+    _charger();
+    if (payeesDAbord && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Versement applique d\'abord aux semaines anterieures (la plus ancienne d\'abord).')));
+    }
+  }
+
+  /// Semaine passee en dette, payee plus tard : le remboursement entre dans
+  /// la caisse de la moto et la ligne passe a "Rembourse".
+  Future<void> _rembourserDette(Versement v) async {
+    final etat = _detteDe(v.detteId);
+    if (v.detteId == null || etat == null || etat.reste <= 0) return;
+    final controleur = TextEditingController(text: etat.reste.toStringAsFixed(0));
+    final confirme = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Dette du ${formaterDate(v.dateEcheance)} payee'),
+        content: TextField(
+          controller: controleur,
+          keyboardType: TextInputType.number,
+          decoration: InputDecoration(
+              labelText: 'Montant recu', helperText: 'Reste du : ${formaterMontant(etat.reste, _devise)}'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Annuler')),
+          ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('Enregistrer')),
+        ],
+      ),
+    );
+    if (confirme != true) return;
+    final montant = lireMontant(controleur.text);
+    if (montant == null || montant <= 0 || montant > etat.reste) {
+      _signalerMontantInvalide();
+      return;
+    }
+    await _db.insererRemboursement(DetteRemboursement(detteId: v.detteId!, montant: montant, date: DateTime.now()));
     _charger();
   }
 
@@ -190,6 +287,9 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     }
     final dues = periodes.where((p) => p.date.isBefore(aujourdHui)).map((p) => p.date).toSet();
     final choisies = dues.isNotEmpty ? dues : {periodes.first.date};
+    // Semaines deja passees mises de cote : elles passeront en dette (restent
+    // visibles, a marquer payees plus tard).
+    final enDette = <DateTime>{};
     double totalChoisi() => periodes.where((p) => choisies.contains(p.date)).fold(0, (t, p) => t + p.reste);
     final montantCtrl = TextEditingController(text: totalChoisi().toStringAsFixed(0));
     var montantModifie = false;
@@ -199,11 +299,22 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
       builder: (context) => StatefulBuilder(
         builder: (context, setStateDialog) {
           final saisi = lireMontant(montantCtrl.text);
+          // Apercu exact : les semaines mises de cote comptent deja comme dettes.
+          final existants = [
+            for (final v in _versements)
+              enDette.contains(ScheduleService.dateSeule(v.dateEcheance))
+                  ? v.copyWith(statut: AppConstants.versementEnDette)
+                  : v,
+          ];
+          void majMontant() {
+            if (!montantModifie) montantCtrl.text = totalChoisi().toStringAsFixed(0);
+          }
+
           final apercu = saisi == null || saisi <= 0
               ? null
               : ScheduleService.affecterVersement(
                   moto: moto,
-                  existants: _versements,
+                  existants: existants,
                   changements: _changementsMontant,
                   aujourdHui: aujourdHui,
                   montant: saisi,
@@ -219,18 +330,65 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text('Periodes payees', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
-                    for (final p in periodes)
+                    const Text('La plus ancienne d\'abord : une semaine passee non payee peut etre mise en dette.',
+                        style: TextStyle(color: AppColors.texteGris, fontSize: 11)),
+                    for (final (i, p) in periodes.indexed)
                       CheckboxListTile(
                         dense: true,
                         contentPadding: EdgeInsets.zero,
                         controlAffinity: ListTileControlAffinity.leading,
                         value: choisies.contains(p.date),
-                        title: Text('${formaterDate(p.date)} : ${formaterMontant(p.reste, _devise)}'),
-                        subtitle: Text('${p.etat[0].toUpperCase()}${p.etat.substring(1)}'),
-                        onChanged: (coche) => setStateDialog(() {
-                          coche == true ? choisies.add(p.date) : choisies.remove(p.date);
-                          if (!montantModifie) montantCtrl.text = totalChoisi().toStringAsFixed(0);
-                        }),
+                        title: Text('${formaterDate(p.date)} : ${formaterMontant(p.reste, _devise)}',
+                            style: enDette.contains(p.date)
+                                ? const TextStyle(decoration: TextDecoration.lineThrough)
+                                : null),
+                        subtitle: Text(enDette.contains(p.date)
+                            ? 'Passera en dette (reste visible, a marquer payee plus tard)'
+                            : '${p.etat[0].toUpperCase()}${p.etat.substring(1)}'),
+                        secondary: enDette.contains(p.date)
+                            ? IconButton(
+                                icon: const Icon(Icons.undo, size: 18),
+                                tooltip: 'Ne pas la passer en dette',
+                                onPressed: () => setStateDialog(() {
+                                  enDette.remove(p.date);
+                                  // Plus de trou : elle est payee avec les suivantes.
+                                  if (periodes.skip(i + 1).any((q) => choisies.contains(q.date))) choisies.add(p.date);
+                                  majMontant();
+                                }),
+                              )
+                            : null,
+                        onChanged: enDette.contains(p.date)
+                            ? null
+                            : (coche) async {
+                                if (coche == true) {
+                                  // Cocher une semaine coche celles d'avant (la plus ancienne d'abord).
+                                  setStateDialog(() {
+                                    for (final q in periodes.take(i + 1)) {
+                                      if (!enDette.contains(q.date)) choisies.add(q.date);
+                                    }
+                                    majMontant();
+                                  });
+                                  return;
+                                }
+                                final suivantesCochees = periodes.skip(i + 1).any((q) => choisies.contains(q.date));
+                                if (suivantesCochees && p.date.isBefore(aujourdHui)) {
+                                  // Sauter une semaine passee : seulement en la mettant en dette.
+                                  if (await _demanderSemainesAnterieures([p], payerDAbord: false) != 'dette') return;
+                                  setStateDialog(() {
+                                    enDette.add(p.date);
+                                    choisies.remove(p.date);
+                                    majMontant();
+                                  });
+                                  return;
+                                }
+                                // Une semaine a venir : on decoche aussi celles d'apres.
+                                setStateDialog(() {
+                                  for (final q in periodes.skip(i)) {
+                                    choisies.remove(q.date);
+                                  }
+                                  majMontant();
+                                });
+                              },
                       ),
                     const SizedBox(height: 8),
                     TextField(
@@ -272,6 +430,11 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     if (montant == null || montant <= 0) {
       _signalerMontantInvalide();
       return;
+    }
+    for (final d in enDette) {
+      final v = _versements.firstWhere((v) =>
+          ScheduleService.dateSeule(v.dateEcheance) == d && v.statut != AppConstants.versementEnDette);
+      await _db.marquerEnDette(v, moto);
     }
     final affectations = await _db.encaisser(moto, montant, choisies: choisies);
     // Les rappels des periodes soldees n'ont plus lieu d'etre.
@@ -821,6 +984,13 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
             ),
             if (estDette) ...[
               const SizedBox(width: 8),
+              if (resteDette != null && resteDette > 0)
+                IconButton(
+                  icon: const Icon(Icons.check_circle_outline, size: 20),
+                  color: AppColors.succes,
+                  tooltip: 'Marquer la dette payee',
+                  onPressed: () => _rembourserDette(v),
+                ),
               const Icon(Icons.chevron_right, size: 18, color: AppColors.texteGris),
             ] else if (!estPaye) ...[
               const SizedBox(width: 8),

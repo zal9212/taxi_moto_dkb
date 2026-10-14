@@ -228,6 +228,26 @@ void main() {
     });
     expect(await io(t, () => db.totalEncaisse(motoId: d.moto.id!)), greaterThan(avant));
   });
+  testWidgets('07d semaine ancienne impayee : la passer en dette pour payer les suivantes', (t) async {
+    final d = await io(t, donnees);
+    await afficher(t, '07d_semaine_en_dette', MotoDetailScreen(motoId: d.moto.id!), ensuite: () async {
+      await t.tap(find.text('Ajouter versement'));
+      await charger(t);
+      // La plus ancienne semaine due, cochee d'avance : on la decoche.
+      await t.tap(find.byType(Checkbox).first);
+      await charger(t);
+      expect(find.text('Semaines anterieures impayees'), findsOneWidget);
+      await t.tap(find.text('Passer en dette'));
+      await charger(t);
+      expect(find.textContaining('Passera en dette'), findsOneWidget);
+      await t.tap(find.text('Enregistrer'));
+      await charger(t);
+    });
+    final versements = await io(t, () => db.listerVersementsParMoto(d.moto.id!));
+    expect(versements.where((v) => v.statut == AppConstants.versementEnDette).length, 1);
+    final retards = versements.where((v) => v.statut == AppConstants.versementEnRetard);
+    expect(retards, isEmpty, reason: 'les autres semaines dues sont payees');
+  });
   testWidgets('08 nouvelle moto', (t) async => afficher(t, '08_nouvelle_moto', const AddEditMotoScreen()));
   testWidgets('09 modifier moto', (t) async {
     final d = await io(t, donnees);

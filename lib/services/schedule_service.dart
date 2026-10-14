@@ -268,6 +268,19 @@ class ScheduleService {
     ]..sort((a, b) => a.date.compareTo(b.date));
   }
 
+  /// Periodes a regler avant de pouvoir payer celle du jour [date] (regle du
+  /// client : toujours la plus ancienne d'abord) : on les paie, ou on passe
+  /// les semaines deja dues en dette.
+  static List<({DateTime date, String etat, double reste})> impayeesAvant({
+    required List<Versement> existants,
+    required Moto moto,
+    required DateTime aujourdHui,
+    required DateTime date,
+  }) =>
+      periodesAPayer(existants: existants, moto: moto, aujourdHui: aujourdHui)
+          .where((p) => p.date.isBefore(dateSeule(date)))
+          .toList();
+
   /// Periodes proposees pour un versement : celles a payer (dues et a
   /// venir), puis les [futures] suivantes du rythme, pas encore creees (au
   /// montant en vigueur a leur date) pour payer d'avance.

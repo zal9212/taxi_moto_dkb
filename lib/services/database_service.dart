@@ -1070,6 +1070,17 @@ class DatabaseService {
         final existants = await listerVersementsParMoto(moto.id!);
         final changements = await listerChangementsMontant(moto.id!);
         final aujourdHui = ScheduleService.aujourdHui();
+        // La plus ancienne d'abord : une semaine impayee ne se saute pas, on
+        // la paie ou on la passe en dette avant (l'ecran le demande).
+        if (choisies != null && choisies.isNotEmpty) {
+          final derniere = choisies.reduce((a, b) => a.isAfter(b) ? a : b);
+          final sautees = ScheduleService.impayeesAvant(
+                  existants: existants, moto: moto, aujourdHui: aujourdHui, date: derniere)
+              .where((p) => !choisies.map(ScheduleService.dateSeule).contains(p.date));
+          if (sautees.isNotEmpty) {
+            throw ArgumentError('Payer d\'abord la periode du ${sautees.first.date} ou la passer en dette.');
+          }
+        }
         final affectations = ScheduleService.affecterVersement(
           moto: moto,
           existants: existants,
@@ -1136,10 +1147,12 @@ class DatabaseService {
   ///    jamais supprimee.
   /// 2. jamais plus que son montant sur une echeance : le surplus est une
   ///    avance, deduite des echeances suivantes.
-  /// 3. l'avance reste regroupee dans l'ordre : apres un changement de
-  ///    montant, l'argent deja verse d'avance se redistribue selon le
-  ///    nouveau montant (la 1re echeance a venir complete, puis la suite),
-  ///    jamais une echeance incomplete suivie d'une echeance payee.
+  /// 3. toujours la plus ancienne d'abord : jamais une echeance incomplete
+  ///    suivie d'une echeance payee (sauf passee en dette). L'argent verse
+  ///    sur une semaine plus recente paie d'abord les semaines anterieures
+  ///    impayees ; apres un changement de montant, l'avance se redistribue
+  ///    selon le nouveau montant. Pour payer une semaine en laissant une
+  ///    plus ancienne de cote, il faut d'abord passer celle-ci en dette.
   /// L'argent deplace garde sa date de paiement : le total encaisse et les
   /// statistiques par date ne changent pas.
   Future<void> normaliser(int motoId) => _enFile(() => _normaliser(motoId));
@@ -1190,15 +1203,18 @@ class DatabaseService {
         await _reporter(txn, moto, r.depuis, r.argent);
       }
 
-      // 3. Avance regroupee : l'argent des echeances a venir qui suivent la
-      // premiere incomplete revient la remplir, puis les suivantes.
+      // 3. La plus ancienne d'abord : l'argent des echeances qui suivent la
+      // premiere incomplete revient la remplir, puis les suivantes. Ni les
+      // dettes ni la pause d'une moto suspendue n'entrent en jeu.
+      final enPause = moto.statut != AppConstants.motoActive;
       final aVenir = (await txn.query(
         'versements',
-        where: 'moto_id = ? AND statut != ? AND date_echeance >= ?',
-        whereArgs: [motoId, AppConstants.versementEnDette, ScheduleService.aujourdHui().toIso8601String()],
+        where: 'moto_id = ? AND statut != ?',
+        whereArgs: [motoId, AppConstants.versementEnDette],
         orderBy: 'date_echeance ASC',
       ))
           .map(Versement.fromMap)
+          .where((v) => !(enPause && v.statut == AppConstants.versementEnAttente))
           .toList();
       final premiereIncomplete = aVenir.indexWhere((v) => ScheduleService.resteDu(v) > 0);
       if (premiereIncomplete >= 0) {
@@ -1209,7 +1225,13 @@ class DatabaseService {
           argent.addAll(await _retirerArgent(txn, v, paye));
           await txn.update(
             'versements',
-            {'statut': AppConstants.versementEnAttente, 'montant_paye': null, 'date_validation': null},
+            {
+              'statut': v.dateEcheance.isBefore(ScheduleService.aujourdHui())
+                  ? AppConstants.versementEnRetard
+                  : AppConstants.versementEnAttente,
+              'montant_paye': null,
+              'date_validation': null,
+            },
             where: 'id = ?',
             whereArgs: [v.id],
           );

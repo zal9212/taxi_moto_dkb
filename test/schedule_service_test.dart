@@ -330,6 +330,16 @@ void main() {
       ]);
     });
 
+    test('impayees avant une date : les semaines a regler (payer ou passer en dette) avant de payer celle-ci', () {
+      expect(
+          ScheduleService.impayeesAvant(existants: existants, moto: m, aujourdHui: aujourdHui, date: DateTime(2026, 10, 5))
+              .map((p) => p.date),
+          [DateTime(2026, 9, 14), DateTime(2026, 9, 21)]);
+      expect(
+          ScheduleService.impayeesAvant(existants: existants, moto: m, aujourdHui: aujourdHui, date: DateTime(2026, 9, 14)),
+          isEmpty);
+    });
+
     test('paie seulement les periodes choisies, meme une future pas encore creee', () {
       expect(affecter(100000, choisies: {DateTime(2026, 9, 21), DateTime(2026, 11, 2)}),
           [(DateTime(2026, 9, 21), 50000), (DateTime(2026, 11, 2), 50000)]);

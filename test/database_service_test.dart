@@ -160,8 +160,10 @@ void main() {
 
       expect(await montantsParJour(motoId), {7: 50000, 14: 60000, 21: 60000, 28: 60000, 5: 50000, 12: 60000});
       final parJour = {for (final v in await db.listerVersementsParMoto(motoId)) v.dateEcheance.day: v};
-      expect(parJour[14]!.montantPaye, 50000); // reste 10000 a payer sur cette periode
-      expect(parJour[21]!.montantPaye, 50000);
+      // La plus ancienne d'abord : le 14/09 (passe a 60 000) est complete avec
+      // l'argent du 21/09, le manque se retrouve sur la semaine la plus recente.
+      expect(parJour[14]!.montantPaye, 60000);
+      expect(parJour[21]!.montantPaye, 40000);
       expect(await db.listerChangementsMontant(motoId), [(depuis: DateTime(2026, 9, 14), montant: 60000.0)]);
       // Le montant de depart de la moto ne bouge pas.
       expect((await db.obtenirMoto(motoId))!.montantVersement, 50000);
@@ -645,9 +647,11 @@ void main() {
         expect((v.montantPaye ?? 0) <= v.montantPrevu, isTrue,
             reason: '$etape : ${v.dateEcheance} payee ${v.montantPaye} pour ${v.montantPrevu}');
       }
-      // 6. L'avance est regroupee : pas d'echeance a venir incomplete suivie d'une echeance a venir payee.
+      // 6. La plus ancienne d'abord : pas d'echeance incomplete suivie d'une echeance payee (hors dettes et pause).
       final aVenir = (await db.listerVersementsParMoto(moto.id!))
-          .where((v) => v.statut != AppConstants.versementEnDette && !v.dateEcheance.isBefore(aujourdHui))
+          .where((v) =>
+              v.statut != AppConstants.versementEnDette &&
+              !(moto.statut != AppConstants.motoActive && v.statut == AppConstants.versementEnAttente))
           .toList()
         ..sort((a, b) => a.dateEcheance.compareTo(b.dateEcheance));
       for (var i = 1; i < aVenir.length; i++) {
@@ -741,8 +745,9 @@ void main() {
             aujourdHui: aujourdHui)
         .where((p) => p.date.isAfter(aujourdHui))
         .toList();
-    await encaisser('versement sur 2 periodes choisies (dont une pas encore creee)', futures.first.reste + futures.last.reste,
-        choisies: {futures.first.date, futures.last.date});
+    await encaisser('versement sur toutes les periodes proposees (dont des pas encore creees)',
+        futures.fold<double>(0, (t, p) => t + p.reste),
+        choisies: futures.map((p) => p.date).toSet());
     await encaisser('gros paiement (avance)', 2000000);
     await db.changerMontant(moto.id!, 260000, aujourdHui);
     await db.assurerEcheances(moto); // comme la fiche moto au rechargement
@@ -764,15 +769,17 @@ void main() {
     final futureNonCreee = periodes.last.date; // au-dela des echeances deja creees
     expect((await db.listerVersementsParMoto(moto.id!)).any((v) => v.dateEcheance == futureNonCreee), isFalse);
 
-    final affectations = await db.encaisser(moto, 100000, choisies: {periodes.first.date, futureNonCreee});
+    // La plus ancienne d'abord : toutes les periodes jusqu'a celle choisie.
+    final total = periodes.fold<double>(0, (t, p) => t + p.reste);
+    final affectations = await db.encaisser(moto, total, choisies: periodes.map((p) => p.date).toSet());
 
-    expect(affectations.map((a) => (a.date, a.montant)), [(periodes.first.date, 50000), (futureNonCreee, 50000)]);
+    expect(affectations.map((a) => a.date), periodes.map((p) => p.date));
     final apres = await db.listerVersementsParMoto(moto.id!);
     final creee = apres.singleWhere((v) => v.dateEcheance == futureNonCreee);
     expect((creee.statut, creee.montantPaye, creee.montantPrevu), (AppConstants.versementPaye, 50000, 50000));
-    expect(await db.totalEncaisse(motoId: moto.id!), 100000);
-    // Une periode due payee (-50 000 de retard) et une d'avance (+50 000).
-    expect(await db.compteMoto(motoId: moto.id!), (retard: avant.retard - 50000, avance: avant.avance + 50000));
+    expect(await db.totalEncaisse(motoId: moto.id!), total);
+    // Tout le retard est paye, le reste est de l'avance.
+    expect(await db.compteMoto(motoId: moto.id!), (retard: 0.0, avance: total - avant.retard));
     // Le roulement ne recree rien dans la periode payee d'avance.
     await db.assurerEcheances(moto);
     expect((await db.listerVersementsParMoto(moto.id!)).where((v) => v.dateEcheance == futureNonCreee).length, 1);
@@ -872,9 +879,16 @@ void main() {
     });
 
     test('avance en cours et nouveau montant : l\'avance se redistribue selon le nouveau montant', () async {
-      final moto = (await db.obtenirMoto(await nouvelleMoto()))!;
-      await db.assurerEcheances(moto);
       final aujourdHui = ScheduleService.aujourdHui();
+      final moto = (await db.obtenirMoto(await db.insererMoto(Moto(
+        nom: 'Moto 1',
+        chauffeur: 'Mamadou',
+        montantVersement: 50000,
+        frequenceType: AppConstants.freqHebdomadaire,
+        frequenceValeur: DateTime.monday,
+        dateDebut: aujourdHui, // aucun retard : seulement de l'avance
+      ))))!;
+      await db.assurerEcheances(moto);
       final futures = (await db.listerVersementsParMoto(moto.id!))
           .where((v) => !v.dateEcheance.isBefore(aujourdHui))
           .map((v) => v.dateEcheance)
@@ -895,6 +909,42 @@ void main() {
       expect(await avance(), [(40000, 40000), (40000, 40000), (40000, 20000)]);
       expect(await db.totalEncaisse(motoId: moto.id!), 100000);
       expect((await db.compteMoto(motoId: moto.id!)).avance, 100000);
+    });
+
+    test('semaine ancienne impayee : payer une semaine plus recente paie d\'abord l\'ancienne', () async {
+      final moto = (await db.obtenirMoto(await nouvelleMoto()))!;
+      await echeanceDe(moto.id!, DateTime(2026, 9, 14));
+      final vingtEtUn = await echeanceDe(moto.id!, DateTime(2026, 9, 21));
+
+      await db.validerVersement(vingtEtUn, montantPaye: 50000);
+
+      final v = await parDate(moto.id!);
+      expect((v[DateTime(2026, 9, 14)]!.statut, v[DateTime(2026, 9, 14)]!.montantPaye), (AppConstants.versementPaye, 50000));
+      expect((v[DateTime(2026, 9, 21)]!.statut, v[DateTime(2026, 9, 21)]!.montantPaye), (AppConstants.versementEnRetard, null));
+      expect(await db.totalEncaisse(motoId: moto.id!), 50000);
+    });
+
+    test('semaine ancienne passee en dette : le versement paie bien la semaine choisie', () async {
+      final moto = (await db.obtenirMoto(await nouvelleMoto()))!;
+      final quatorze = await echeanceDe(moto.id!, DateTime(2026, 9, 14));
+      final vingtEtUn = await echeanceDe(moto.id!, DateTime(2026, 9, 21));
+      await db.marquerEnDette((await parDate(moto.id!))[DateTime(2026, 9, 14)]!, moto);
+
+      await db.validerVersement(vingtEtUn, montantPaye: 50000);
+
+      final v = await parDate(moto.id!);
+      expect(v[DateTime(2026, 9, 14)]!.statut, AppConstants.versementEnDette);
+      expect(v[DateTime(2026, 9, 21)]!.montantPaye, 50000);
+      expect(quatorze, isNotNull);
+    });
+
+    test('encaisser refuse de sauter une semaine impayee (il faut la payer ou la passer en dette)', () async {
+      final moto = (await db.obtenirMoto(await nouvelleMoto()))!;
+      await echeanceDe(moto.id!, DateTime(2026, 9, 14));
+      await echeanceDe(moto.id!, DateTime(2026, 9, 21));
+
+      expect(() => db.encaisser(moto, 50000, choisies: {DateTime(2026, 9, 21)}), throwsArgumentError);
+      expect(await db.totalEncaisse(motoId: moto.id!), 0);
     });
 
     test('baisser le montant : ce qui a ete paye en trop devient de l\'avance sur la suite', () async {
