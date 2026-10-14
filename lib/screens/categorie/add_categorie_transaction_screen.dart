@@ -104,11 +104,12 @@ class _AddCategorieTransactionScreenState extends State<AddCategorieTransactionS
               if (widget.gerants.isNotEmpty) ...[
                 const SizedBox(height: 16),
                 DropdownButtonFormField<int?>(
+                  isExpanded: true,
                   initialValue: _gerantId,
                   decoration: const InputDecoration(labelText: 'Qui ?'),
                   items: [
                     const DropdownMenuItem(value: null, child: Text(AppConstants.libelleProprietaire)),
-                    for (final g in widget.gerants) DropdownMenuItem(value: g.id, child: Text(g.nom)),
+                    for (final g in widget.gerants) DropdownMenuItem(value: g.id, child: Text(g.nom, overflow: TextOverflow.ellipsis)),
                   ],
                   onChanged: (v) => setState(() => _gerantId = v),
                 ),

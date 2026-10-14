@@ -77,17 +77,19 @@ class _AddExpenseScreenState extends State<AddExpenseScreen> {
           padding: const EdgeInsets.all(16),
           children: [
             DropdownButtonFormField<int>(
+              isExpanded: true,
               initialValue: _motoId,
               decoration: const InputDecoration(labelText: 'Moto concernee'),
-              items: _motos.map((m) => DropdownMenuItem(value: m.id, child: Text('${m.nom} - ${m.chauffeur}'))).toList(),
+              items: _motos.map((m) => DropdownMenuItem(value: m.id, child: Text('${m.nom} - ${m.chauffeur}', overflow: TextOverflow.ellipsis))).toList(),
               onChanged: (v) => setState(() => _motoId = v),
               validator: (v) => v == null ? 'Selectionnez une moto' : null,
             ),
             const SizedBox(height: 12),
             DropdownButtonFormField<int>(
+              isExpanded: true,
               initialValue: _categorieId,
               decoration: const InputDecoration(labelText: 'Categorie'),
-              items: _categories.map((c) => DropdownMenuItem(value: c.id, child: Text(c.nom))).toList(),
+              items: _categories.map((c) => DropdownMenuItem(value: c.id, child: Text(c.nom, overflow: TextOverflow.ellipsis))).toList(),
               onChanged: (v) => setState(() => _categorieId = v),
               validator: (v) => v == null ? 'Selectionnez une categorie' : null,
             ),

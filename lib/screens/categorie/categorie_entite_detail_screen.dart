@@ -281,7 +281,7 @@ class _CategorieEntiteDetailScreenState extends State<CategorieEntiteDetailScree
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text('Comptes', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                const Expanded(child: Text('Comptes', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600))),
                 TextButton.icon(
                   onPressed: _ajouterGerant,
                   icon: const Icon(Icons.person_add_alt, size: 16),

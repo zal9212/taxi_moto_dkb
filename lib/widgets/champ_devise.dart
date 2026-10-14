@@ -73,11 +73,12 @@ class _ChampDeviseState extends State<ChampDevise> {
     final options = {..._devises, if (valeur != null) valeur}.toList()..sort();
     return DropdownButtonFormField<String>(
       key: ValueKey('$valeur-$_version-${options.length}'),
+      isExpanded: true,
       initialValue: valeur,
       decoration: InputDecoration(labelText: widget.label),
       items: [
-        for (final o in options) DropdownMenuItem(value: o, child: Text(o)),
-        const DropdownMenuItem(value: _ajouter, child: Text('+ Ajouter une devise...')),
+        for (final o in options) DropdownMenuItem(value: o, child: Text(o, overflow: TextOverflow.ellipsis)),
+        const DropdownMenuItem(value: _ajouter, child: Text('+ Ajouter une devise...', overflow: TextOverflow.ellipsis)),
       ],
       onChanged: (v) {
         if (v == _ajouter) {

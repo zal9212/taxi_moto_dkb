@@ -336,10 +336,11 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
                       if (_lienType == AppConstants.detteLienMoto) ...[
                         const SizedBox(height: 10),
                         DropdownButtonFormField<int>(
+                          isExpanded: true,
                           initialValue: _lienId,
                           decoration: const InputDecoration(labelText: 'Moto'),
                           items: _motos
-                              .map((m) => DropdownMenuItem(value: m.id, child: Text('${m.nom} - ${m.chauffeur}')))
+                              .map((m) => DropdownMenuItem(value: m.id, child: Text('${m.nom} - ${m.chauffeur}', overflow: TextOverflow.ellipsis)))
                               .toList(),
                           onChanged: (v) => setState(() => _lienId = v),
                         ),
@@ -347,10 +348,11 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
                       if (_lienType == AppConstants.detteLienCategorieEntite) ...[
                         const SizedBox(height: 10),
                         DropdownButtonFormField<int>(
+                          isExpanded: true,
                           initialValue: _categorieChoisieId,
                           decoration: const InputDecoration(labelText: 'Categorie'),
                           items: _categories
-                              .map((c) => DropdownMenuItem(value: c.id, child: Text(c.nom)))
+                              .map((c) => DropdownMenuItem(value: c.id, child: Text(c.nom, overflow: TextOverflow.ellipsis)))
                               .toList(),
                           onChanged: (v) {
                             setState(() {
@@ -364,10 +366,11 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
                         ),
                         const SizedBox(height: 10),
                         DropdownButtonFormField<int>(
+                          isExpanded: true,
                           initialValue: _lienId,
                           decoration: const InputDecoration(labelText: 'Entite'),
                           items: _entitesCategorieChoisie
-                              .map((e) => DropdownMenuItem(value: e.id, child: Text(e.nom)))
+                              .map((e) => DropdownMenuItem(value: e.id, child: Text(e.nom, overflow: TextOverflow.ellipsis)))
                               .toList(),
                           onChanged: (v) => setState(() => _lienId = v),
                         ),
