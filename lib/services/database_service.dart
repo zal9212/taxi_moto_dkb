@@ -769,88 +769,23 @@ class DatabaseService {
     return (result.first['total'] as num).toDouble();
   }
 
-  /// Solde net (d'une moto si [motoId] est fourni, sinon global) : positif
-  /// si plus a ete verse que ce qui etait du jusqu'a aujourd'hui (avance),
-  /// negatif si de l'argent est du (retard). A la difference d'une simple
-  /// somme des echeances au statut "en_retard", ce calcul tient aussi
-  /// compte des versements partiels sur des echeances marquees payees
-  /// (le manque n'est alors plus "perdu") et des versements superieurs au
-  /// montant prevu (le credit se reporte sur les echeances suivantes).
-  ///
-  /// Le montant du (totalDu) ne compte que les echeances des motos encore
-  /// actives : une moto suspendue/archivee ne doit plus voir son retard
-  /// grossir avec le temps qui passe pendant qu'elle est hors service.
-  /// Le montant recu (totalRecu), lui, reste toujours comptabilise quel
-  /// que soit le statut actuel de la moto — l'argent deja encaisse ne
-  /// disparait pas quand on met une moto en pause.
-  Future<double> soldeNet({int? motoId}) async {
-    final db = await database;
-    // Due a partir du lendemain de son echeance, comme [actualiserRetards].
-    final aujourdHui = ScheduleService.aujourdHui().toIso8601String();
-
-    final recuConditions = <String>['statut = ?'];
-    final recuArgs = <dynamic>[AppConstants.versementPaye];
-    if (motoId != null) {
-      recuConditions.add('moto_id = ?');
-      recuArgs.add(motoId);
-    }
-    final recu = await db.rawQuery(
-      'SELECT COALESCE(SUM(montant_paye), 0) as total FROM versements WHERE ${recuConditions.join(' AND ')}',
-      recuArgs,
-    );
-
-    // Une echeance passee en dette est suivie dans Dettes : la compter ici
-    // aussi la ferait payer deux fois.
-    // Moto suspendue : les echeances tombees pendant la pause (restees "en
-    // attente") ne sont pas dues ; ses versements payes et ses retards
-    // d'avant la pause, si.
-    final duConditions = <String>[
-      'date_echeance < ?',
-      'statut != ?',
-      '(statut != ? OR moto_id IN (SELECT id FROM motos WHERE statut = ?))',
-    ];
-    final duArgs = <dynamic>[
-      aujourdHui,
-      AppConstants.versementEnDette,
-      AppConstants.versementEnAttente,
-      AppConstants.motoActive,
-    ];
-    if (motoId != null) {
-      duConditions.add('moto_id = ?');
-      duArgs.add(motoId);
-    }
-    final du = await db.rawQuery(
-      'SELECT COALESCE(SUM(montant_prevu), 0) as total FROM versements WHERE ${duConditions.join(' AND ')}',
-      duArgs,
-    );
-
-    final totalRecu = (recu.first['total'] as num).toDouble();
-    final totalDu = (du.first['total'] as num).toDouble();
-    return totalRecu - totalDu;
+  /// Solde d'une moto (voir [ScheduleService.solde], seule definition) :
+  /// negatif = retard, positif = avance.
+  Future<double> soldeNet({required int motoId}) async {
+    final moto = await obtenirMoto(motoId);
+    if (moto == null) return 0;
+    return ScheduleService.solde(moto, await listerVersementsParMoto(motoId), ScheduleService.aujourdHui());
   }
 
-  /// Solde net de chaque moto active (meme calcul que [soldeNet]), en une
-  /// requete : le retard global de l'accueil additionne les soldes negatifs
-  /// moto par moto — l'avance d'une moto ne compense pas le retard d'une
-  /// autre, et une moto suspendue (dont tous les paiements restent comptes)
-  /// ne gonfle plus le total.
+  /// Solde de chaque moto active : le retard global de l'accueil additionne
+  /// les soldes negatifs moto par moto — l'avance d'une moto ne compense pas
+  /// le retard d'une autre, et une moto suspendue ne gonfle pas le total.
   Future<Map<int, double>> soldesMotosActives({int? motoId}) async {
-    final db = await database;
-    final lignes = await db.rawQuery(
-      'SELECT m.id, '
-      'COALESCE((SELECT SUM(v.montant_paye) FROM versements v WHERE v.moto_id = m.id AND v.statut = ?), 0) - '
-      'COALESCE((SELECT SUM(v.montant_prevu) FROM versements v WHERE v.moto_id = m.id AND v.date_echeance < ? '
-      'AND v.statut != ?), 0) '
-      'AS solde FROM motos m WHERE m.statut = ?${motoId != null ? ' AND m.id = ?' : ''}',
-      [
-        AppConstants.versementPaye,
-        ScheduleService.aujourdHui().toIso8601String(),
-        AppConstants.versementEnDette,
-        AppConstants.motoActive,
-        if (motoId != null) motoId,
-      ],
-    );
-    return {for (final l in lignes) l['id'] as int: (l['solde'] as num).toDouble()};
+    final motos = await listerMotos(statut: AppConstants.motoActive);
+    return {
+      for (final m in motos)
+        if (motoId == null || m.id == motoId) m.id!: await soldeNet(motoId: m.id!),
+    };
   }
 
   /// Total des versements reçus (payés), regroupé par période, pour les
@@ -1103,36 +1038,20 @@ class DatabaseService {
   }
 
   /// "Encaisser un versement" : le montant recu est reparti sur les periodes
-  /// dues, la plus ancienne d'abord (voir [ScheduleService.repartirPaiement]).
-  /// Une periode existante est completee (jamais recreee) ; une periode
-  /// absente de l'historique est creee a sa vraie date. Chaque part est
-  /// ecrite dans le journal des paiements, datee d'aujourd'hui. Retourne la
-  /// repartition (pour le recu).
+  /// a payer, la plus ancienne d'abord (voir [ScheduleService.repartirPaiement]),
+  /// en completant leurs echeances. Chaque part est ecrite dans le journal
+  /// des paiements, datee d'aujourd'hui. Retourne la repartition (pour le recu).
   Future<List<({DateTime date, double montant})>> encaisser(Moto moto, double montant) => _enFile(() async {
         final existants = await listerVersementsParMoto(moto.id!);
-        final aujourdHui = ScheduleService.aujourdHui();
-        final changements = await listerChangementsMontant(moto.id!);
         final affectations = ScheduleService.repartirPaiement(
-          ScheduleService.periodesAPayer(
-              existants: existants, moto: moto, aujourdHui: aujourdHui, changements: changements),
+          ScheduleService.periodesAPayer(existants: existants, moto: moto, aujourdHui: ScheduleService.aujourdHui()),
           montant,
         );
         final maintenant = DateTime.now();
         for (final a in affectations) {
-          final existante = existants.where((v) =>
+          final echeance = existants.firstWhere((v) =>
               ScheduleService.dateSeule(v.dateEcheance) == a.date && v.statut != AppConstants.versementEnDette);
-          if (existante.isNotEmpty) {
-            await ajouterPaiement(existante.first.id!, a.montant, date: maintenant);
-          } else {
-            await insererVersement(Versement(
-              motoId: moto.id!,
-              dateEcheance: a.date,
-              dateValidation: maintenant,
-              montantPrevu: ScheduleService.montantAu(moto, changements, a.date),
-              montantPaye: a.montant,
-              statut: AppConstants.versementPaye,
-            ));
-          }
+          await ajouterPaiement(echeance.id!, a.montant, date: maintenant);
         }
         return affectations;
       });

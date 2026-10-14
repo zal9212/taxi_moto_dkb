@@ -2,48 +2,34 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 
-import '../core/constants.dart';
 import '../models/moto.dart';
 import '../models/versement.dart';
 import '../models/depense.dart';
+import '../models/dette.dart';
+import '../utils/messages.dart';
 import 'schedule_service.dart';
 
 /// Génère les relevés PDF (par moto, ou rapport général toutes motos) et
-/// propose le partage/l'impression natif du téléphone. Aucune notion de
-/// dette : uniquement le suivi des versements reçus et des dépenses.
+/// propose le partage/l'impression natif du téléphone.
 class PdfService {
   PdfService._();
 
-  /// Meme regle que DatabaseService.soldeNet : due le lendemain de son
-  /// echeance, sauf passee en dette (suivie dans Dettes) ou tombee pendant
-  /// la pause d'une moto suspendue (restee "en attente").
-  static bool _estDue(Versement v, Moto moto, DateTime aujourdHui) =>
-      v.dateEcheance.isBefore(aujourdHui) &&
-      v.statut != AppConstants.versementEnDette &&
-      (moto.statut == AppConstants.motoActive || v.statut != AppConstants.versementEnAttente);
-
+  /// Releve d'une moto. Les chiffres (encaisse, solde, dettes) sont ceux
+  /// de la fiche moto, pas un second calcul : le PDF dit toujours la meme
+  /// chose que l'app.
   static Future<void> genererEtPartagerReleve({
     required Moto moto,
     required List<Versement> versements,
     required List<Depense> depenses,
     required String deviseSymbole,
+    required double totalEncaisse,
+    required double remboursementsDettes,
+    required double solde,
+    required List<Dette> dettes,
+    required ({double rembourse, double reste})? Function(int? detteId) detteDe,
   }) async {
     final doc = pw.Document();
-
-    final totalVerse = versements
-        .where((v) => v.statut == AppConstants.versementPaye)
-        .fold<double>(0, (s, v) => s + (v.montantPaye ?? 0));
-    // Solde net : compare ce qui a ete reellement verse a ce qui etait du
-    // pour toutes les echeances deja passees (paiements partiels et
-    // versements superieurs au montant prevu sont donc bien pris en compte,
-    // contrairement a une simple somme des echeances au statut "en_retard").
-    // Due a partir du lendemain de son echeance, comme dans l'app (soldeNet).
     final aujourdHui = ScheduleService.aujourdHui();
-    // Une echeance passee en dette est suivie dans Dettes (pas comptee deux fois).
-    final totalDu = versements
-        .where((v) => _estDue(v, moto, aujourdHui))
-        .fold<double>(0, (s, v) => s + v.montantPrevu);
-    final solde = totalVerse - totalDu;
     final totalDepenses = depenses.fold<double>(0, (s, d) => s + d.montant);
 
     doc.addPage(
@@ -57,7 +43,9 @@ class PdfService {
           ),
           pw.Text('Chauffeur : ${moto.chauffeur}'),
           pw.Text('Montant par versement : ${moto.montantVersement.toStringAsFixed(0)} $deviseSymbole'),
-          pw.Text('Total verse : ${totalVerse.toStringAsFixed(0)} $deviseSymbole'),
+          pw.Text('Total encaisse : ${totalEncaisse.toStringAsFixed(0)} $deviseSymbole'),
+          if (remboursementsDettes > 0)
+            pw.Text('  dont ${remboursementsDettes.toStringAsFixed(0)} $deviseSymbole de remboursements de dettes'),
           pw.Text(
             solde < 0
                 ? 'Solde : en retard de ${(-solde).toStringAsFixed(0)} $deviseSymbole'
@@ -73,19 +61,43 @@ class PdfService {
           pw.SizedBox(height: 6),
           pw.Table.fromTextArray(
             headers: ['Echeance', 'Statut', 'Montant prevu', 'Montant paye', 'Date validation'],
-            data: versements
-                .map((v) => [
-                      _formaterDate(v.dateEcheance),
-                      v.statut,
-                      v.montantPrevu.toStringAsFixed(0),
-                      v.montantPaye?.toStringAsFixed(0) ?? '-',
-                      v.dateValidation != null ? _formaterDate(v.dateValidation!) : '-',
-                    ])
-                .toList(),
+            data: versements.map((v) {
+              // Meme libelle que la fiche ; une echeance en dette compte ses remboursements.
+              final ligne = ligneVersement(v,
+                  dette: detteDe(v.detteId), aujourdHui: aujourdHui, devise: deviseSymbole);
+              return [
+                _formaterDate(v.dateEcheance),
+                ligne.libelle,
+                v.montantPrevu.toStringAsFixed(0),
+                ligne.paye?.toStringAsFixed(0) ?? '-',
+                v.dateValidation != null ? _formaterDate(v.dateValidation!) : '-',
+              ];
+            }).toList(),
             cellStyle: const pw.TextStyle(fontSize: 9),
             headerStyle: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold),
           ),
           pw.SizedBox(height: 16),
+
+          if (dettes.isNotEmpty) ...[
+            pw.Text('Dettes liees', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
+            pw.SizedBox(height: 6),
+            pw.Table.fromTextArray(
+              headers: ['Date', 'Motif', 'Montant', 'Rembourse', 'Reste'],
+              data: dettes.map((d) {
+                final etat = detteDe(d.id);
+                return [
+                  _formaterDate(d.date),
+                  d.notes ?? '-',
+                  d.montantInitial.toStringAsFixed(0),
+                  etat?.rembourse.toStringAsFixed(0) ?? '-',
+                  etat == null ? '-' : etat.reste <= 0 ? 'Rembourse' : etat.reste.toStringAsFixed(0),
+                ];
+              }).toList(),
+              cellStyle: const pw.TextStyle(fontSize: 9),
+              headerStyle: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold),
+            ),
+            pw.SizedBox(height: 16),
+          ],
 
           pw.Text('Depenses',
               style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
@@ -116,7 +128,8 @@ class PdfService {
   /// retards, dépenses) sur une période optionnelle.
   static Future<void> genererEtPartagerRapportGlobal({
     required List<Moto> motos,
-    required Map<int, List<Versement>> versementsParMoto,
+    required Map<int, double> encaisseParMoto,
+    required Map<int, double> soldeParMoto,
     required Map<int, List<Depense>> depensesParMoto,
     required String deviseSymbole,
   }) async {
@@ -126,21 +139,11 @@ class PdfService {
     double totalGeneralRetard = 0;
     double totalGeneralAvance = 0;
     double totalGeneralDepenses = 0;
-    final aujourdHui = ScheduleService.aujourdHui();
 
     final lignes = motos.map((m) {
-      final versements = m.id != null ? (versementsParMoto[m.id] ?? []) : <Versement>[];
       final depenses = m.id != null ? (depensesParMoto[m.id] ?? []) : <Depense>[];
-      final verse = versements
-          .where((v) => v.statut == AppConstants.versementPaye)
-          .fold<double>(0, (s, v) => s + (v.montantPaye ?? 0));
-      // Solde net (voir genererEtPartagerReleve) : plus fiable qu'une simple
-      // somme des echeances au statut "en_retard", car il tient compte des
-      // paiements partiels et des versements superieurs au montant prevu.
-      final du = versements
-          .where((v) => _estDue(v, m, aujourdHui))
-          .fold<double>(0, (s, v) => s + v.montantPrevu);
-      final solde = verse - du;
+      final verse = encaisseParMoto[m.id] ?? 0;
+      final solde = soldeParMoto[m.id] ?? 0;
       final retard = solde < 0 ? -solde : 0.0;
       final avance = solde > 0 ? solde : 0.0;
       final dep = depenses.fold<double>(0, (s, d) => s + d.montant);
@@ -172,7 +175,7 @@ class PdfService {
           pw.Text('Genere le ${_formaterDate(DateTime.now())}'),
           pw.SizedBox(height: 16),
           pw.Table.fromTextArray(
-            headers: ['Moto', 'Chauffeur', 'Total verse', 'En retard', 'En avance', 'Depenses'],
+            headers: ['Moto', 'Chauffeur', 'Total encaisse', 'En retard', 'En avance', 'Depenses'],
             data: lignes,
             cellStyle: const pw.TextStyle(fontSize: 9),
             headerStyle: pw.TextStyle(fontSize: 9, fontWeight: pw.FontWeight.bold),
@@ -180,7 +183,7 @@ class PdfService {
           pw.SizedBox(height: 20),
           pw.Divider(),
           pw.SizedBox(height: 8),
-          pw.Text('Total general verse : ${totalGeneralVerse.toStringAsFixed(0)} $deviseSymbole',
+          pw.Text('Total general encaisse : ${totalGeneralVerse.toStringAsFixed(0)} $deviseSymbole',
               style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),
           pw.Text('Total general en retard : ${totalGeneralRetard.toStringAsFixed(0)} $deviseSymbole',
               style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),

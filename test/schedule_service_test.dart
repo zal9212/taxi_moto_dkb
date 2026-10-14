@@ -182,28 +182,8 @@ void main() {
     });
   });
 
-  group('datesManquantes (echeances oubliees)', () {
-    final existants = [
-      echeance(DateTime(2026, 9, 7), paye),
-      echeance(DateTime(2026, 9, 14), paye),
-      // 21/09 et 28/09 n'existent pas
-      echeance(DateTime(2026, 10, 5), enAttente),
-    ];
-
-    test('trouve les echeances manquantes au milieu de l\'historique', () {
-      expect(
-        ScheduleService.datesManquantes(
-          existants: existants,
-          depuis: DateTime(2026, 9, 7),
-          type: hebdo,
-          valeur: DateTime.monday,
-          aujourdHui: aujourdHui,
-        ),
-        [DateTime(2026, 9, 21), DateTime(2026, 9, 28)],
-      );
-    });
-
-    test('periodes a payer : retards, partielles, manquantes et a venir, sans les payees ni les dettes', () {
+  group('argent du (seule definition : periodes a payer et solde)', () {
+    test('periodes a payer : retards, partielles et a venir, sans les payees ni les dettes', () {
       final periodes = ScheduleService.periodesAPayer(
         existants: [
           echeance(DateTime(2026, 8, 31), paye),
@@ -215,7 +195,7 @@ void main() {
             statut: paye,
           ),
           echeance(DateTime(2026, 9, 14), enRetard),
-          // 21/09 n'existe pas
+          // 21/09 n'a pas d'echeance (effacee) : rien n'est du
           echeance(DateTime(2026, 9, 28), AppConstants.versementEnDette),
           echeance(DateTime(2026, 10, 5), enAttente),
         ],
@@ -223,10 +203,11 @@ void main() {
         aujourdHui: aujourdHui,
       );
 
-      expect(periodes.map((p) => p.date),
-          [DateTime(2026, 9, 7), DateTime(2026, 9, 14), DateTime(2026, 9, 21), DateTime(2026, 10, 5)]);
-      expect(periodes.map((p) => p.etat), ['partiel', 'en retard', 'manquante', 'a venir']);
-      expect(periodes.map((p) => p.reste), [20000, 50000, 50000, 50000]);
+      expect(periodes.map((p) => (p.date, p.etat, p.reste)), [
+        (DateTime(2026, 9, 7), 'partiel', 20000),
+        (DateTime(2026, 9, 14), 'en retard', 50000),
+        (DateTime(2026, 10, 5), 'a venir', 50000),
+      ]);
     });
 
     test('montant en vigueur : depart avant le 1er changement, puis chaque changement jusqu\'au suivant', () {
@@ -244,26 +225,10 @@ void main() {
       expect(ScheduleService.montantAu(m, const [], DateTime(2027)), 50000);
     });
 
-    test('periode oubliee : comptee au montant en vigueur a sa date, pas au montant du jour', () {
-      final periodes = ScheduleService.periodesAPayer(
-        existants: [echeance(DateTime(2026, 9, 7), paye), echeance(DateTime(2026, 9, 28), enRetard)],
-        moto: moto(hebdo, DateTime.monday, dateDebut: DateTime(2026, 9, 7)),
-        aujourdHui: aujourdHui,
-        changements: [(depuis: DateTime(2026, 9, 21), montant: 60000.0)],
-      );
-
-      // 14/09 (avant le changement) et 21/09 (apres) n'ont jamais eu d'echeance.
-      expect(periodes.map((p) => (p.date, p.etat, p.reste)), [
-        (DateTime(2026, 9, 14), 'manquante', 50000),
-        (DateTime(2026, 9, 21), 'manquante', 60000),
-        (DateTime(2026, 9, 28), 'en retard', 50000),
-      ]);
-    });
-
     test('repartition : la plus ancienne periode est payee d\'abord, le reste passe a la suivante', () {
       final periodes = [
         (date: DateTime(2026, 9, 14), etat: 'en retard', reste: 50000.0),
-        (date: DateTime(2026, 9, 21), etat: 'manquante', reste: 50000.0),
+        (date: DateTime(2026, 9, 21), etat: 'en retard', reste: 50000.0),
         (date: DateTime(2026, 10, 5), etat: 'a venir', reste: 50000.0),
       ];
 
@@ -285,15 +250,39 @@ void main() {
       ]);
     });
 
+    test('moto suspendue puis reactivee : les semaines de pause ne sont pas dues', () {
+      // Lundis payes jusqu'au 07/09, pause du 08/09 au 27/09, reprise le lundi 28/09.
+      final periodes = ScheduleService.periodesAPayer(
+        existants: [
+          echeance(DateTime(2026, 8, 31), paye),
+          echeance(DateTime(2026, 9, 7), paye),
+          echeance(DateTime(2026, 9, 28), enRetard),
+          echeance(DateTime(2026, 10, 5), enAttente),
+        ],
+        moto: moto(hebdo, DateTime.monday, dateDebut: DateTime(2026, 8, 31)),
+        aujourdHui: aujourdHui,
+      );
+
+      expect(periodes.map((p) => p.date), [DateTime(2026, 9, 28), DateTime(2026, 10, 5)]);
+    });
+
+    test('moto suspendue : ses echeances de la pause (restees en attente) ne sont ni a payer ni dans le solde', () {
+      final suspendue = moto(hebdo, DateTime.monday).copyWith(statut: AppConstants.motoSuspendue);
+      final existants = [
+        echeance(DateTime(2026, 9, 14), enRetard), // retard d'avant la pause : du
+        echeance(DateTime(2026, 9, 21), enAttente), // pendant la pause
+      ];
+
+      expect(
+          ScheduleService.periodesAPayer(existants: existants, moto: suspendue, aujourdHui: aujourdHui)
+              .map((p) => p.date),
+          [DateTime(2026, 9, 14)]);
+      expect(ScheduleService.solde(suspendue, existants, aujourdHui), -50000);
+    });
+
     test('jour change (lundi -> mercredi) : les semaines payees le lundi ne sont pas redemandees le mercredi', () {
-      // Lundis jusqu'au 14/09, puis passage au mercredi a partir du 16/09 ; le 23/09 a ete oublie.
-      List<DateTime> manquantes(List<Versement> existants) => ScheduleService.datesManquantes(
-            existants: existants,
-            depuis: DateTime(2026, 8, 31),
-            type: hebdo,
-            valeur: DateTime.wednesday,
-            aujourdHui: aujourdHui,
-          );
+      // Cas reel (TVs 125) : lundis jusqu'au 14/09, puis mercredis a partir du 16/09.
+      final m = moto(hebdo, DateTime.wednesday, dateDebut: DateTime(2026, 8, 31));
       final existants = [
         echeance(DateTime(2026, 8, 31), paye),
         echeance(DateTime(2026, 9, 7), paye),
@@ -302,21 +291,28 @@ void main() {
         echeance(DateTime(2026, 9, 30), enRetard),
         echeance(DateTime(2026, 10, 7), enAttente),
       ];
+      final dues = ScheduleService.periodesAPayer(existants: existants, moto: m, aujourdHui: aujourdHui)
+          .where((p) => p.date.isBefore(aujourdHui));
 
-      expect(manquantes(existants), [DateTime(2026, 9, 23)]);
+      expect(dues.map((p) => p.date), [DateTime(2026, 9, 14), DateTime(2026, 9, 16), DateTime(2026, 9, 30)]);
+      // La relance (somme des periodes dues) et la fiche (solde) disent la meme chose.
+      expect(ScheduleService.solde(m, existants, aujourdHui), -dues.fold<double>(0, (t, p) => t + p.reste));
     });
 
-    test('trouve aussi celles d\'avant la premiere echeance, et jamais de date future', () {
+    test('solde : payee sans montant = payee en entier, dette exclue, partiel compte ce qui manque', () {
+      final m = moto(hebdo, DateTime.monday);
+      final existants = [
+        echeance(DateTime(2026, 9, 7), paye), // ancien import, sans montant
+        Versement(motoId: 1, dateEcheance: DateTime(2026, 9, 14), montantPrevu: 50000, montantPaye: 30000, statut: paye),
+        echeance(DateTime(2026, 9, 21), AppConstants.versementEnDette),
+        echeance(DateTime(2026, 9, 28), enRetard),
+      ];
+
+      expect(ScheduleService.solde(m, existants, aujourdHui), -70000);
       expect(
-        ScheduleService.datesManquantes(
-          existants: existants,
-          depuis: DateTime(2026, 8, 24),
-          type: hebdo,
-          valeur: DateTime.monday,
-          aujourdHui: aujourdHui,
-        ),
-        [DateTime(2026, 8, 24), DateTime(2026, 8, 31), DateTime(2026, 9, 21), DateTime(2026, 9, 28)],
-      );
+          ScheduleService.periodesAPayer(existants: existants, moto: m, aujourdHui: aujourdHui)
+              .fold<double>(0, (t, p) => t + p.reste),
+          70000);
     });
   });
 

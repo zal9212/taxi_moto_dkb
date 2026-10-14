@@ -90,8 +90,7 @@ class ScheduleService {
   /// plus continue donc de grossir au lieu de s'arrêter à 4 échéances.
   /// Rien n'est créé dans la période déjà couverte par les échéances
   /// conservées (de la première à la dernière : payées, retards, dettes) :
-  /// jamais de paiement redemandé ni de retard en double. Les trous au milieu
-  /// se comblent à la main (voir [datesManquantes]).
+  /// jamais de paiement redemandé ni de retard en double.
   static List<DateTime> datesAGenerer({
     required List<Versement> existants,
     required DateTime premiere,
@@ -119,44 +118,6 @@ class ScheduleService {
       v.statut != AppConstants.versementEnDette &&
       !dateSeule(v.dateEcheance).isBefore(aujourdHui);
 
-  /// Dates passées de la fréquence, à partir de [depuis], qui n'ont aucune
-  /// échéance (oubliées au début ou au milieu de l'historique), pour les
-  /// ajouter à la main — rien n'est supprimé ni déplacé.
-  /// Une échéance hors de la grille actuelle vient d'un ancien plan (jour,
-  /// fréquence ou date de début changés) : jusqu'à elle, l'historique suit
-  /// cet ancien plan et la grille actuelle n'y dit rien (sinon une semaine
-  /// payée le lundi serait redemandée le mercredi).
-  static List<DateTime> datesManquantes({
-    required List<Versement> existants,
-    required DateTime depuis,
-    required String type,
-    required int valeur,
-    required DateTime aujourdHui,
-  }) {
-    final occupees = existants.map((v) => dateSeule(v.dateEcheance)).toSet();
-    final fin = occupees.fold(aujourdHui, (f, d) => d.isAfter(f) ? d : f);
-    final grille = [
-      for (var d = premiereEcheance(dateDebut: depuis, type: type, valeur: valeur);
-          !d.isAfter(fin);
-          d = echeanceSuivante(dateActuelle: d, type: type, valeur: valeur))
-        d,
-    ];
-    final surGrille = grille.toSet();
-    DateTime? dernierAncienPlan;
-    for (final d in occupees) {
-      if (!surGrille.contains(d) && (dernierAncienPlan == null || d.isAfter(dernierAncienPlan))) {
-        dernierAncienPlan = d;
-      }
-    }
-    return [
-      for (final d in grille)
-        if (d.isBefore(aujourdHui) &&
-            !occupees.contains(d) &&
-            (dernierAncienPlan == null || d.isAfter(dernierAncienPlan)))
-          d,
-    ];
-  }
-
   /// Montant du versement en vigueur le jour [d] : celui du dernier
   /// changement date au plus tard ce jour-la, sinon le montant de depart de
   /// la moto ([Moto.montantVersement]). [changements] : du plus ancien au
@@ -170,44 +131,69 @@ class ScheduleService {
     return montant;
   }
 
-  /// Ce qui reste dû sur une échéance (0 si payée en entier ou passée en
-  /// dette). Une échéance "payée" sans montant enregistré (ancien import)
-  /// compte comme soldée : on ne redemande jamais un paiement déjà fait.
-  static double resteDu(Versement v) {
-    if (v.statut == AppConstants.versementEnDette) return 0;
-    final paye = v.montantPaye ?? (v.statut == AppConstants.versementPaye ? v.montantPrevu : 0);
-    return (v.montantPrevu - paye).clamp(0, double.infinity).toDouble();
+  // ---------------------------------------------------------------------
+  // Argent du : la SEULE definition de l'app. La fiche moto, l'accueil, la
+  // relance, l'encaissement, le recu et les PDF passent tous par ici.
+  // Source de verite = les echeances enregistrees : l'app en cree une pour
+  // chaque periode due ; une periode sans echeance (pause d'une moto
+  // suspendue, echeance effacee) n'est jamais due.
+  // ---------------------------------------------------------------------
+
+  /// Ce qui a ete paye sur une echeance. "Payee" sans montant enregistre
+  /// (ancien import) = payee en entier : on ne redemande jamais un paiement
+  /// deja fait.
+  static double montantPaye(Versement v) =>
+      v.montantPaye ?? (v.statut == AppConstants.versementPaye ? v.montantPrevu : 0);
+
+  /// Echeance qui compte dans ce qui est du : passee (due le lendemain de
+  /// son jour), pas passee en dette (suivie dans Dettes, sinon payee deux
+  /// fois), et pas tombee pendant la pause d'une moto suspendue (restee
+  /// "en attente").
+  static bool estDue(Versement v, Moto moto, DateTime aujourdHui) =>
+      dateSeule(v.dateEcheance).isBefore(aujourdHui) &&
+      v.statut != AppConstants.versementEnDette &&
+      (moto.statut == AppConstants.motoActive || v.statut != AppConstants.versementEnAttente);
+
+  /// Solde de la moto : tout ce qui a ete verse sur ses echeances moins ce
+  /// qui est du a ce jour. Negatif = retard, positif = avance (un trop-paye
+  /// se reporte sur la suite). L'argent recu compte toujours, meme moto
+  /// suspendue.
+  static double solde(Moto moto, List<Versement> versements, DateTime aujourdHui) {
+    var total = 0.0;
+    for (final v in versements) {
+      if (v.statut == AppConstants.versementPaye) total += montantPaye(v);
+      if (estDue(v, moto, aujourdHui)) total -= v.montantPrevu;
+    }
+    return total;
   }
 
-  /// Périodes encore dues, de la plus ancienne à la plus récente, avec ce qui
-  /// reste à payer : échéances partielles, en retard ou à venir, et périodes
-  /// passées qui n'ont jamais eu d'échéance (depuis la date de début). Pas
-  /// les périodes soldées, ni celles passées en dette (elles se remboursent
-  /// dans Dettes).
+  /// Ce qui reste dû sur une échéance (0 si payée en entier ou passée en
+  /// dette).
+  static double resteDu(Versement v) {
+    if (v.statut == AppConstants.versementEnDette) return 0;
+    return (v.montantPrevu - montantPaye(v)).clamp(0, double.infinity).toDouble();
+  }
+
+  /// Périodes encore à payer, de la plus ancienne à la plus récente, avec ce
+  /// qui reste : échéances partielles, en retard ou à venir. Pas les
+  /// soldées, ni celles passées en dette (elles se remboursent dans
+  /// Dettes), ni celles de la pause d'une moto suspendue.
   static List<({DateTime date, String etat, double reste})> periodesAPayer({
     required List<Versement> existants,
     required Moto moto,
     required DateTime aujourdHui,
-    List<ChangementMontant> changements = const [],
   }) {
     String etat(Versement v) => v.statut == AppConstants.versementPaye
         ? 'partiel'
         : dateSeule(v.dateEcheance).isBefore(aujourdHui)
             ? 'en retard'
             : 'a venir';
-    final periodes = [
+    final enPause = moto.statut != AppConstants.motoActive;
+    return [
       for (final v in existants)
-        if (resteDu(v) > 0) (date: dateSeule(v.dateEcheance), etat: etat(v), reste: resteDu(v)),
-      for (final d in datesManquantes(
-        existants: existants,
-        depuis: moto.dateDebut,
-        type: moto.frequenceType,
-        valeur: moto.frequenceValeur,
-        aujourdHui: aujourdHui,
-      ))
-        (date: d, etat: 'manquante', reste: montantAu(moto, changements, d)),
+        if (resteDu(v) > 0 && !(enPause && v.statut == AppConstants.versementEnAttente))
+          (date: dateSeule(v.dateEcheance), etat: etat(v), reste: resteDu(v)),
     ]..sort((a, b) => a.date.compareTo(b.date));
-    return periodes;
   }
 
   /// Répartit un montant reçu sur les périodes dues, la plus ancienne

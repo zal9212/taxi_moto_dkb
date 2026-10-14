@@ -1,5 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intl/date_symbol_data_local.dart';
+import 'package:moto_taxi_douka/core/constants.dart';
+import 'package:moto_taxi_douka/models/versement.dart';
+import 'package:moto_taxi_douka/utils/formatters.dart';
 import 'package:moto_taxi_douka/utils/messages.dart';
 
 void main() {
@@ -52,5 +55,27 @@ void main() {
     );
 
     expect(message, contains('A jour'));
+  });
+
+  test('ligne d\'echeance : une dette remboursee en partie montre ce qui est deja paye et le reste', () {
+    final aujourdHui = DateTime(2026, 10, 14);
+    Versement v(String statut, {double? paye}) => Versement(
+        motoId: 1, dateEcheance: DateTime(2026, 10, 7), montantPrevu: 185000, montantPaye: paye, statut: statut);
+    String libelle(Versement x, {({double rembourse, double reste})? dette}) =>
+        ligneVersement(x, dette: dette, aujourdHui: aujourdHui, devise: 'FG').libelle;
+    double? paye(Versement x, {({double rembourse, double reste})? dette}) =>
+        ligneVersement(x, dette: dette, aujourdHui: aujourdHui, devise: 'FG').paye;
+
+    final enDette = v(AppConstants.versementEnDette);
+    expect(libelle(enDette, dette: (rembourse: 100000, reste: 85000)), 'Dette (reste ${formaterMontant(85000, 'FG')})');
+    expect(paye(enDette, dette: (rembourse: 100000, reste: 85000)), 100000);
+    // Paye en partie avant d'etre passee en dette : les deux comptent.
+    expect(paye(v(AppConstants.versementEnDette, paye: 50000), dette: (rembourse: 100000, reste: 35000)), 150000);
+    expect(libelle(enDette, dette: (rembourse: 185000, reste: 0)), 'Rembourse');
+
+    expect(libelle(v(AppConstants.versementPaye, paye: 185000)), 'Paye');
+    expect(libelle(v(AppConstants.versementPaye, paye: 85000)), 'Partiel (reste ${formaterMontant(100000, 'FG')})');
+    expect(libelle(v(AppConstants.versementEnRetard)), 'En retard');
+    expect(paye(v(AppConstants.versementEnRetard)), isNull);
   });
 }

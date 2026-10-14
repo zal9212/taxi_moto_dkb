@@ -13,6 +13,7 @@ import 'package:moto_taxi_douka/models/moto.dart';
 import 'package:moto_taxi_douka/models/versement.dart';
 import 'package:moto_taxi_douka/services/backup_service.dart';
 import 'package:moto_taxi_douka/services/database_service.dart';
+import 'package:moto_taxi_douka/services/schedule_service.dart';
 import 'package:moto_taxi_douka/services/excel_service.dart';
 import 'package:excel/excel.dart' hide Border;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -615,6 +616,32 @@ void main() {
     });
   });
 
+  test('coherence : fiche, accueil et relance donnent le meme du apres changement de jour, paiement et dette', () async {
+    var moto = (await db.obtenirMoto(await nouvelleMoto()))!;
+    await db.assurerEcheances(moto);
+    // Lundi -> mercredi, comme la TVs 125.
+    moto = moto.copyWith(frequenceValeur: DateTime.wednesday);
+    await db.modifierMoto(moto);
+    await db.replanifierEcheances(moto, depuisDateDebut: false);
+    await db.encaisser(moto, 80000);
+    final enRetard = (await db.listerVersementsParMoto(moto.id!))
+        .where((v) => v.statut == AppConstants.versementEnRetard)
+        .last;
+    await db.marquerEnDette(enRetard, moto);
+
+    final aujourdHui = ScheduleService.aujourdHui();
+    final relance = ScheduleService.periodesAPayer(
+      existants: await db.listerVersementsParMoto(moto.id!),
+      moto: moto,
+      aujourdHui: aujourdHui,
+    ).where((p) => p.date.isBefore(aujourdHui)).fold<double>(0, (t, p) => t + p.reste);
+    final fiche = await db.soldeNet(motoId: moto.id!);
+
+    expect(relance, greaterThan(0));
+    expect(fiche, -relance);
+    expect((await db.soldesMotosActives())[moto.id], fiche);
+  });
+
   group('echeance marquee en dette', () {
     Future<Versement> retard(int motoId, DateTime date) async {
       final id = await db.insererVersement(Versement(
@@ -629,7 +656,7 @@ void main() {
     test('la dette apparait dans Dettes, liee a la moto, et ne compte plus dans le retard', () async {
       final moto = (await db.obtenirMoto(await nouvelleMoto()))!;
       final v = await retard(moto.id!, DateTime(2026, 9, 14));
-      expect(await db.soldeNet(motoId: moto.id), -50000);
+      expect(await db.soldeNet(motoId: moto.id!), -50000);
 
       final detteId = await db.marquerEnDette(v, moto);
 
@@ -640,7 +667,7 @@ void main() {
       final apres = (await db.listerVersementsParMoto(moto.id!)).single;
       expect(apres.statut, AppConstants.versementEnDette);
       expect(apres.detteId, detteId);
-      expect(await db.soldeNet(motoId: moto.id), 0);
+      expect(await db.soldeNet(motoId: moto.id!), 0);
       expect(await db.soldesMotosActives(motoId: moto.id), {moto.id!: 0});
       expect(await db.prochainVersement(moto.id!), isNull);
     });
@@ -654,7 +681,7 @@ void main() {
       final v = (await db.listerVersementsParMoto(moto.id!)).single;
       expect(v.statut, AppConstants.versementEnRetard);
       expect(v.detteId, isNull);
-      expect(await db.soldeNet(motoId: moto.id), -50000);
+      expect(await db.soldeNet(motoId: moto.id!), -50000);
     });
 
     test('la reactivation garde les retards et dettes d\'avant la pause, et retire seulement les echeances de la pause', () async {
@@ -674,8 +701,7 @@ void main() {
   });
 
   group('encaisser un montant (repartition automatique)', () {
-    /// Moto du lundi depuis le 07/09 : payee le 07/09, en retard le 14/09,
-    /// le 21/09 n'a jamais ete enregistre.
+    /// Moto du lundi depuis le 07/09 : payee le 07/09, en retard les 14 et 21/09.
     Future<Moto> motoAvecRetards() async {
       final moto = (await db.obtenirMoto(await nouvelleMoto()))!;
       await db.insererVersement(Versement(
@@ -692,13 +718,19 @@ void main() {
         montantPrevu: 50000,
         statut: AppConstants.versementEnRetard,
       ));
+      await db.insererVersement(Versement(
+        motoId: moto.id!,
+        dateEcheance: DateTime(2026, 9, 21),
+        montantPrevu: 50000,
+        statut: AppConstants.versementEnRetard,
+      ));
       return moto;
     }
 
     Future<Map<DateTime, Versement>> parDate(int motoId) async =>
         {for (final v in await db.listerVersementsParMoto(motoId)) v.dateEcheance: v};
 
-    test('80 000 soldent le retard du 14/09 et paient 30 000 sur le 21/09 (cree, partiel)', () async {
+    test('80 000 soldent le retard du 14/09 et paient 30 000 sur le 21/09 (partiel)', () async {
       final moto = await motoAvecRetards();
 
       final affectations = await db.encaisser(moto, 80000);

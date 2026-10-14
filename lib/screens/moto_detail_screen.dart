@@ -161,7 +161,6 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
         existants: _versements,
         moto: _moto!,
         aujourdHui: ScheduleService.aujourdHui(),
-        changements: _changementsMontant,
       );
 
   /// Periodes deja passees et pas soldees (ce que le chauffeur doit).
@@ -300,6 +299,12 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
       versements: _versements,
       depenses: depenses,
       deviseSymbole: _devise,
+      // Memes chiffres que la fiche, pas un second calcul.
+      totalEncaisse: _totalVerse,
+      remboursementsDettes: _remboursementsDettes,
+      solde: _solde,
+      dettes: _dettes,
+      detteDe: _detteDe,
     );
   }
 
@@ -697,6 +702,15 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     );
   }
 
+  /// Deja rembourse et reste du d'une dette de la moto (null si elle
+  /// n'existe plus).
+  ({double rembourse, double reste})? _detteDe(int? detteId) {
+    final reste = _soldeParDette[detteId];
+    final dette = _dettes.where((d) => d.id == detteId).firstOrNull;
+    if (reste == null || dette == null) return null;
+    return (rembourse: dette.montantInitial - reste, reste: reste);
+  }
+
   Widget _ligneVersement(Versement v) {
     final estPaye = v.statut == AppConstants.versementPaye;
     final estDette = v.statut == AppConstants.versementEnDette;
@@ -704,30 +718,19 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     final resteDette = estDette ? _soldeParDette[v.detteId] : null;
     final passeeNonPayee = !estPaye && !estDette && v.dateEcheance.isBefore(ScheduleService.aujourdHui());
 
-    late Color couleur;
-    late String libelle;
-    final resteAPayer = ScheduleService.resteDu(v);
-    if (estPaye && resteAPayer > 0) {
+    // Meme libelle que le releve PDF (voir [ligneVersement]).
+    final libelle =
+        ligneVersement(v, dette: _detteDe(v.detteId), aujourdHui: ScheduleService.aujourdHui(), devise: _devise).libelle;
+    final Color couleur;
+    if (estPaye) {
       // Paye en partie : le reste sera complete au prochain encaissement.
-      couleur = AppColors.danger;
-      libelle = 'Partiel (reste ${formaterMontant(resteAPayer, _devise)})';
-    } else if (estPaye) {
-      couleur = AppColors.succes;
-      libelle = 'Paye';
+      couleur = ScheduleService.resteDu(v) > 0 ? AppColors.danger : AppColors.succes;
     } else if (estDette) {
-      final rembourse = resteDette != null && resteDette <= 0;
-      couleur = rembourse ? AppColors.succes : AppColors.danger;
-      libelle = rembourse
-          ? 'Rembourse'
-          : resteDette == null
-              ? 'Dette'
-              : 'Dette (reste ${formaterMontant(resteDette, _devise)})';
+      couleur = resteDette != null && resteDette <= 0 ? AppColors.succes : AppColors.danger;
     } else if (passeeNonPayee || v.statut == AppConstants.versementEnRetard) {
       couleur = AppColors.danger;
-      libelle = 'En retard';
     } else {
       couleur = AppColors.texteGris;
-      libelle = 'A venir';
     }
 
     return InkWell(

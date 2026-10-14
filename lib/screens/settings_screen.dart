@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import '../core/theme.dart';
 import '../models/depense.dart';
 import '../models/parametre.dart';
-import '../models/versement.dart';
 import '../services/backup_service.dart';
 import '../services/database_service.dart';
 import '../services/auth_service.dart';
@@ -211,16 +210,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _generationRapportEnCours = true);
     try {
       final motos = await _db.listerMotos();
-      final versementsParMoto = <int, List<Versement>>{};
+      // Memes chiffres que la fiche de chaque moto.
+      final encaisseParMoto = <int, double>{};
+      final soldeParMoto = <int, double>{};
       final depensesParMoto = <int, List<Depense>>{};
       for (final m in motos) {
         if (m.id == null) continue;
-        versementsParMoto[m.id!] = await _db.listerVersementsParMoto(m.id!);
+        encaisseParMoto[m.id!] = await _db.totalEncaisse(motoId: m.id!);
+        soldeParMoto[m.id!] = await _db.soldeNet(motoId: m.id!);
         depensesParMoto[m.id!] = await _db.listerDepensesParMoto(m.id!);
       }
       await PdfService.genererEtPartagerRapportGlobal(
         motos: motos,
-        versementsParMoto: versementsParMoto,
+        encaisseParMoto: encaisseParMoto,
+        soldeParMoto: soldeParMoto,
         depensesParMoto: depensesParMoto,
         deviseSymbole: _parametres?.deviseSymbole ?? 'FG',
       );
