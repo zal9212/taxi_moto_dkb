@@ -88,9 +88,14 @@ class ScheduleService {
   /// payées à partir d'aujourd'hui. Les dates déjà passées sont créées aussi
   /// (elles deviennent des retards) : le retard d'un chauffeur qui ne paie
   /// plus continue donc de grossir au lieu de s'arrêter à 4 échéances.
-  /// Rien n'est créé dans la période déjà couverte par les échéances
-  /// conservées (de la première à la dernière : payées, retards, dettes) :
-  /// jamais de paiement redemandé ni de retard en double.
+  /// Jamais deux échéances dans la même période (règle de transition) :
+  /// une date n'est créée que si sa période ne chevauche celle d'aucune
+  /// échéance conservée (payées, retards, dettes). Chaque échéance conservée
+  /// couvre jusqu'à la suivante ; la dernière, sur la durée de l'ancien
+  /// rythme (voir [_finCouverture]). Ex : lundi 14/09 dû, passage au
+  /// mercredi -> premier mercredi le 23/09, pas le 16/09. Vaut pour tout
+  /// changement (jour, fréquence, date de début, reprise après pause) :
+  /// jamais de paiement redemandé ni de semaine comptée deux fois.
   static List<DateTime> datesAGenerer({
     required List<Versement> existants,
     required DateTime premiere,
@@ -98,18 +103,68 @@ class ScheduleService {
     required int valeur,
     required DateTime aujourdHui,
   }) {
-    final occupees = existants.map((v) => dateSeule(v.dateEcheance)).toList()..sort();
+    final occupees = existants.map((v) => dateSeule(v.dateEcheance)).toSet().toList()..sort();
     var aVenir = existants.where((v) => _estAVenir(v, aujourdHui)).length;
+    final finDerniere = occupees.isEmpty
+        ? null
+        : occupees.length >= 2
+            ? _finCouverture(occupees[occupees.length - 2], occupees.last)
+            : echeanceSuivante(dateActuelle: occupees.last, type: type, valeur: valeur);
 
     final dates = <DateTime>[];
+    bool chevauche(DateTime d) {
+      // Une nouvelle echeance ne tombe pas non plus dans la periode de la
+      // precedente (ex : debut un jeudi, versement le lundi -> pas le lundi
+      // 4 jours apres, mais celui d'apres).
+      if (dates.isNotEmpty && d.isBefore(finPeriode(dates.last, type: type, valeur: valeur))) return true;
+      final finD = finPeriode(d, type: type, valeur: valeur);
+      for (var i = 0; i < occupees.length; i++) {
+        final fin = i + 1 < occupees.length ? occupees[i + 1] : finDerniere!;
+        if (d.isBefore(fin) && occupees[i].isBefore(finD)) return true;
+      }
+      return false;
+    }
+
     for (var d = dateSeule(premiere);
         aVenir < fenetreEcheances;
         d = echeanceSuivante(dateActuelle: d, type: type, valeur: valeur)) {
-      if (occupees.isNotEmpty && !d.isBefore(occupees.first) && !d.isAfter(occupees.last)) continue;
+      if (chevauche(d)) continue;
       dates.add(d);
       if (!d.isBefore(aujourdHui)) aVenir++;
     }
     return dates;
+  }
+
+  /// Fin (exclue) de la période couverte par une échéance du jour [d] : une
+  /// semaine, un mois (même jour, ajusté au mois court) ou l'intervalle
+  /// choisi, quel que soit le jour de [d].
+  static DateTime finPeriode(DateTime d, {required String type, required int valeur}) {
+    final j = dateSeule(d);
+    switch (type) {
+      case AppConstants.freqHebdomadaire:
+        return DateTime(j.year, j.month, j.day + 7);
+      case AppConstants.freqMensuelle:
+        return _jourDuMois(j.year, j.month + 1, j.day);
+      case AppConstants.freqPersonnalisee:
+      default:
+        return DateTime(j.year, j.month, j.day + (valeur < 1 ? 1 : valeur));
+    }
+  }
+
+  /// Fin de la période couverte par la dernière échéance [derniere], au
+  /// rythme qu'elle suivait (l'écart avec la précédente) : un mois plus tard
+  /// si les deux tombent le même jour de deux mois qui se suivent, sinon le
+  /// même nombre de jours.
+  static DateTime _finCouverture(DateTime precedente, DateTime derniere) {
+    final moisSuivant = DateTime(precedente.year, precedente.month + 1, precedente.day);
+    if (precedente.day == derniere.day && moisSuivant == derniere) {
+      return _jourDuMois(derniere.year, derniere.month + 1, derniere.day);
+    }
+    // Jours calendaires (en UTC : pas d'erreur d'un jour au changement d'heure).
+    final jours = DateTime.utc(derniere.year, derniere.month, derniere.day)
+        .difference(DateTime.utc(precedente.year, precedente.month, precedente.day))
+        .inDays;
+    return DateTime(derniere.year, derniere.month, derniere.day + jours);
   }
 
   /// Échéance encore attendue (ni payée, ni passée en dette) à partir d'aujourd'hui.

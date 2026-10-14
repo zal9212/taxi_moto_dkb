@@ -616,6 +616,92 @@ void main() {
     });
   });
 
+  test('invariants : l\'app s\'adapte seule a chaque modification (jour, frequence, date, montant, pause, dette)', () async {
+    final aujourdHui = ScheduleService.aujourdHui();
+    var moto = (await db.obtenirMoto(await db.insererMoto(Moto(
+      nom: 'TVs 125',
+      chauffeur: 'Abdoul',
+      montantVersement: 185000,
+      frequenceType: AppConstants.freqHebdomadaire,
+      frequenceValeur: DateTime.monday,
+      dateDebut: aujourdHui.subtract(const Duration(days: 70)),
+    ))))!;
+    await db.assurerEcheances(moto);
+    var encaisse = 0.0;
+
+    Future<void> verifier(String etape) async {
+      final echeances = (await db.listerVersementsParMoto(moto.id!)).map((v) => v.dateEcheance).toList()..sort();
+      // 1. Jamais deux echeances dans la meme periode (tous les rythmes ici durent 7 jours ou plus).
+      for (var i = 1; i < echeances.length; i++) {
+        expect(echeances[i].difference(echeances[i - 1]).inDays, greaterThanOrEqualTo(7),
+            reason: '$etape : ${echeances[i - 1]} et ${echeances[i]} dans la meme periode');
+      }
+      // 2. Rien de deja paye n'est perdu ni compte deux fois.
+      expect(await db.totalEncaisse(motoId: moto.id!), encaisse, reason: etape);
+      // 3. Fiche, accueil et relance disent la meme chose.
+      final fiche = await db.soldeNet(motoId: moto.id!);
+      final relance = ScheduleService.periodesAPayer(
+        existants: await db.listerVersementsParMoto(moto.id!),
+        moto: moto,
+        aujourdHui: aujourdHui,
+      ).where((p) => p.date.isBefore(aujourdHui)).fold<double>(0, (t, p) => t + p.reste);
+      expect(relance, fiche < 0 ? -fiche : 0, reason: '$etape : relance $relance, fiche $fiche');
+      if (moto.statut == AppConstants.motoActive) {
+        expect((await db.soldesMotosActives())[moto.id], fiche, reason: etape);
+        // 4. Toujours les prochaines echeances a venir.
+        expect(
+            (await db.listerVersementsParMoto(moto.id!))
+                .where((v) => v.statut == AppConstants.versementEnAttente && !v.dateEcheance.isBefore(aujourdHui))
+                .length,
+            ScheduleService.fenetreEcheances,
+            reason: etape);
+      }
+    }
+
+    Future<void> changerPlan(String etape, Moto nouveau, {bool depuisDateDebut = false}) async {
+      moto = nouveau;
+      await db.modifierMoto(moto);
+      await db.replanifierEcheances(moto, depuisDateDebut: depuisDateDebut);
+      await verifier(etape);
+    }
+
+    Future<void> encaisser(String etape, double montant) async {
+      await db.encaisser(moto, montant);
+      encaisse += montant;
+      await db.assurerEcheances(moto); // comme la fiche moto au rechargement
+      await verifier(etape);
+    }
+
+    await verifier('creation');
+    await encaisser('premier paiement', 400000);
+    await changerPlan('lundi -> mercredi', moto.copyWith(frequenceValeur: DateTime.wednesday));
+    await changerPlan(
+        'date de debut avancee + vendredi',
+        moto.copyWith(
+            frequenceValeur: DateTime.friday, dateDebut: aujourdHui.subtract(const Duration(days: 90))),
+        depuisDateDebut: true);
+    await changerPlan('hebdomadaire -> mensuel (le 15)',
+        moto.copyWith(frequenceType: AppConstants.freqMensuelle, frequenceValeur: 15));
+    await changerPlan('mensuel -> hebdomadaire (lundi)',
+        moto.copyWith(frequenceType: AppConstants.freqHebdomadaire, frequenceValeur: DateTime.monday));
+    await changerPlan('tous les 10 jours',
+        moto.copyWith(frequenceType: AppConstants.freqPersonnalisee, frequenceValeur: 10));
+    await db.changerMontant(moto.id!, 200000, aujourdHui.subtract(const Duration(days: 30)));
+    await verifier('nouveau montant depuis 30 jours');
+    final unRetard = (await db.listerVersementsParMoto(moto.id!))
+        .lastWhere((v) => v.statut == AppConstants.versementEnRetard);
+    await db.marquerEnDette(unRetard, moto);
+    await verifier('retard passe en dette');
+    moto = moto.copyWith(statut: AppConstants.motoSuspendue);
+    await db.modifierMoto(moto);
+    await verifier('suspendue');
+    moto = moto.copyWith(statut: AppConstants.motoActive);
+    await db.modifierMoto(moto);
+    await db.redemarrerEcheancesApresReactivation(moto);
+    await verifier('reactivee');
+    await encaisser('gros paiement (avance)', 2000000);
+  });
+
   test('coherence : fiche, accueil et relance donnent le meme du apres changement de jour, paiement et dette', () async {
     var moto = (await db.obtenirMoto(await nouvelleMoto()))!;
     await db.assurerEcheances(moto);
