@@ -273,7 +273,12 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
   /// Message de relance pret a envoyer (WhatsApp, SMS...) au chauffeur.
   void _relancerChauffeur() {
     final dues = _periodesDues();
-    if (_moto == null || dues.isEmpty) return;
+    if (_moto == null) return;
+    if (dues.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Rien a relancer : aucun versement en retard pour cette moto.')));
+      return;
+    }
     Share.share(messageRelance(chauffeur: _moto!.chauffeur, moto: _moto!.nom, dues: dues, devise: _devise));
   }
 
@@ -497,12 +502,13 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
           ],
         ),
         actions: [
-          if (_periodesDues().isNotEmpty)
-            IconButton(
-              icon: const Icon(Icons.send_outlined),
-              tooltip: 'Relancer le chauffeur',
-              onPressed: _relancerChauffeur,
-            ),
+          // Toujours visible : un bouton qui disparait quand la moto est a
+          // jour laisse croire a un bug ; on explique plutot pourquoi.
+          IconButton(
+            icon: const Icon(Icons.send_outlined),
+            tooltip: 'Relancer le chauffeur',
+            onPressed: _relancerChauffeur,
+          ),
           IconButton(
             icon: const Icon(Icons.picture_as_pdf_outlined),
             tooltip: 'Exporter le releve',
