@@ -1067,6 +1067,12 @@ class ExcelService {
           lien.versementId, lien.detteFichier != null ? idDetteFichierVersDb[lien.detteFichier] : null);
     }
 
+    // Un fichier peut amener des doublons ou des trop-payes : memes regles
+    // que dans l'app (un versement par periode, surplus = avance).
+    for (final motoId in idMotoParNom.values.toSet()) {
+      await db.normaliser(motoId);
+    }
+
     return rapport;
   }
 

@@ -155,9 +155,10 @@ void main() {
         aujourdHui: aujourdHui,
       );
 
-      // Debut un samedi : le lundi 03/08 tomberait dans sa semaine -> 10/08.
+      // Debut un samedi (semaine du 27/07) : le lundi 03/08 ouvre une nouvelle semaine.
       expect(nouvelles, [
         DateTime(2026, 8, 1),
+        DateTime(2026, 8, 3),
         DateTime(2026, 8, 10),
         DateTime(2026, 8, 17),
         DateTime(2026, 8, 24),
@@ -384,9 +385,9 @@ void main() {
       ]);
     });
 
-    test('transition : jamais 2 echeances dans la meme periode (lundi deja du, passage au mercredi + date de debut)', () {
-      // Cas reel (TVs 125) : le lundi 14/09 couvre la semaine du 14 au 20/09 ;
-      // le premier mercredi doit etre le 23/09, pas le 16/09.
+    test('transition : un seul versement par semaine (lundi deja du, passage au mercredi + date de debut)', () {
+      // Cas reel (TVs 125) : la semaine du 14/09 a deja son versement (lundi 14/09) ;
+      // le premier mercredi est celui de la semaine suivante, le 23/09, pas le 16/09.
       final plan = ScheduleService.replanifier(
         existants: [
           echeance(DateTime(2026, 8, 31), paye),
@@ -408,8 +409,8 @@ void main() {
       ]);
     });
 
-    test('transition : mercredi -> lundi attend la fin de la semaine deja due', () {
-      // Le mercredi 30/09 couvre jusqu'au 06/10 : premier lundi = 12/10 (pas 05/10).
+    test('transition : mercredi -> lundi reprend la semaine suivante, sans jour offert', () {
+      // Semaine du 28/09 : deja le mercredi 30/09 -> pas le lundi 28/09 ; le lundi 05/10 ouvre la semaine suivante.
       final plan = ScheduleService.replanifier(
         existants: [
           echeance(DateTime(2026, 9, 23), paye),
@@ -421,10 +422,57 @@ void main() {
         aujourdHui: aujourdHui,
       );
 
-      expect(plan.aCreer.first, DateTime(2026, 10, 12));
+      expect(plan.aCreer.first, DateTime(2026, 10, 5));
     });
 
-    test('regle 2 : changer la date de debut fixe le 1er versement a cette date, la suite suit la frequence apres une periode complete', () {
+    test('transition : lundi -> vendredi, le vendredi d\'une semaine deja payee est saute', () {
+      final plan = ScheduleService.replanifier(
+        existants: [
+          echeance(DateTime(2026, 8, 31), paye),
+          echeance(DateTime(2026, 9, 7), paye),
+          echeance(DateTime(2026, 9, 14), enRetard),
+        ],
+        moto: moto(hebdo, DateTime.friday, dateDebut: DateTime(2026, 8, 31)),
+        depuisDateDebut: true,
+        aujourdHui: aujourdHui,
+      );
+
+      // 04, 11 et 18/09 sont dans des semaines qui ont deja leur lundi.
+      expect(plan.aCreer.first, DateTime(2026, 9, 25));
+    });
+
+    test('transition : hebdomadaire -> mensuel, un seul versement par mois', () {
+      final plan = ScheduleService.replanifier(
+        existants: [
+          echeance(DateTime(2026, 8, 31), paye),
+          echeance(DateTime(2026, 9, 7), paye),
+          echeance(DateTime(2026, 9, 14), enRetard),
+        ],
+        moto: moto(mensuelle, 15, dateDebut: DateTime(2026, 8, 31)),
+        depuisDateDebut: true,
+        aujourdHui: aujourdHui,
+      );
+
+      // Septembre a deja ses versements : le 15/09 est saute.
+      expect(plan.aCreer.first, DateTime(2026, 10, 15));
+    });
+
+    test('transition : hebdomadaire -> tous les 10 jours, 10 jours au moins apres le dernier versement', () {
+      final plan = ScheduleService.replanifier(
+        existants: [
+          echeance(DateTime(2026, 9, 21), paye),
+          echeance(DateTime(2026, 9, 28), paye),
+          echeance(DateTime(2026, 10, 5), enAttente),
+        ],
+        moto: moto(perso, 10, dateDebut: DateTime(2026, 9, 21)),
+        depuisDateDebut: true,
+        aujourdHui: aujourdHui,
+      );
+
+      expect(plan.aCreer.first, DateTime(2026, 10, 11)); // 21/09, 01/10 (trop pres du 28/09), 11/10
+    });
+
+    test('regle 2 : changer la date de debut fixe le 1er versement a cette date, la suite suit la frequence', () {
       final plan = ScheduleService.replanifier(
         existants: historiqueLundis(),
         moto: moto(hebdo, DateTime.monday, dateDebut: DateTime(2026, 10, 14)),
@@ -439,12 +487,12 @@ void main() {
         DateTime(2026, 10, 19),
         DateTime(2026, 10, 26),
       ]);
-      // Mercredi 14/10 couvre jusqu'au 20/10 : le lundi 19/10 serait la meme semaine.
+      // Mercredi 14/10 (semaine du 12/10), puis lundi 19/10 : semaine suivante.
       expect(plan.aCreer, [
         DateTime(2026, 10, 14),
+        DateTime(2026, 10, 19),
         DateTime(2026, 10, 26),
         DateTime(2026, 11, 2),
-        DateTime(2026, 11, 9),
       ]);
     });
 

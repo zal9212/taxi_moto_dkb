@@ -564,17 +564,20 @@ class DatabaseService {
 
   /// Valide un versement : marque payé, fixe la date de validation
   /// et permet d'ajuster le montant réellement versé si besoin.
-  Future<void> validerVersement(int versementId, {double? montantPaye}) async {
-    final db = await database;
-    final maps = await db.query('versements', where: 'id = ?', whereArgs: [versementId]);
-    if (maps.isEmpty) return;
-    final v = Versement.fromMap(maps.first);
-    await modifierVersement(v.copyWith(
-      statut: AppConstants.versementPaye,
-      dateValidation: DateTime.now(),
-      montantPaye: montantPaye ?? v.montantPrevu,
-    ));
-  }
+  /// Plus que le montant prevu : le surplus est une avance, deduite des
+  /// echeances suivantes (voir [normaliser]).
+  Future<void> validerVersement(int versementId, {double? montantPaye}) => _enFile(() async {
+        final db = await database;
+        final maps = await db.query('versements', where: 'id = ?', whereArgs: [versementId]);
+        if (maps.isEmpty) return;
+        final v = Versement.fromMap(maps.first);
+        await modifierVersement(v.copyWith(
+          statut: AppConstants.versementPaye,
+          dateValidation: DateTime.now(),
+          montantPaye: montantPaye ?? v.montantPrevu,
+        ));
+        await _normaliser(v.motoId);
+      });
 
   /// Ajoute une somme recue sur une echeance (paiement partiel ou
   /// complement) : une ligne datee dans le journal, et le total de
@@ -611,15 +614,22 @@ class DatabaseService {
   /// de validation. Le journal est reecrit : un seul paiement du montant
   /// corrige, a la date du premier paiement (la correction ne deplace pas
   /// l'argent vers aujourd'hui).
-  Future<void> modifierMontantPaye(int versementId, double nouveauMontant) async {
+  /// A la hausse au-dela du montant prevu : le surplus va aux echeances
+  /// suivantes (voir [normaliser]).
+  Future<void> modifierMontantPaye(int versementId, double nouveauMontant) => _enFile(() async {
+        final motoId = await _modifierMontantPaye(versementId, nouveauMontant);
+        if (motoId != null) await _normaliser(motoId);
+      });
+
+  Future<int?> _modifierMontantPaye(int versementId, double nouveauMontant) async {
     final db = await database;
-    await db.transaction((txn) async {
+    return db.transaction((txn) async {
       final premier = await txn.rawQuery(
         'SELECT MIN(date) AS d FROM paiements WHERE versement_id = ?',
         [versementId],
       );
       final maps = await txn.query('versements', where: 'id = ?', whereArgs: [versementId]);
-      if (maps.isEmpty) return;
+      if (maps.isEmpty) return null;
       final v = Versement.fromMap(maps.first);
       final datePremier = premier.first['d'] as String?;
       await txn.update('versements', {'montant_paye': nouveauMontant}, where: 'id = ?', whereArgs: [versementId]);
@@ -631,6 +641,7 @@ class DatabaseService {
           dateValidation: datePremier != null ? DateTime.parse(datePremier) : v.dateValidation,
         ),
       );
+      return v.motoId;
     });
   }
 
@@ -880,6 +891,7 @@ class DatabaseService {
 
   Future<int> _assurerEcheances(Moto moto) async {
     if (moto.id == null) return 0;
+    await _normaliser(moto.id!);
     final existants = await listerVersementsParMoto(moto.id!); // tri date DESC
     final dates = ScheduleService.datesAGenerer(
       existants: existants,
@@ -914,12 +926,15 @@ class DatabaseService {
       aujourdHui: ScheduleService.aujourdHui(),
     );
     await _remplacerEcheances(plan.aSupprimer, await _nouvellesEcheances(moto, plan.aCreer));
+    await _normaliser(moto.id!);
   }
 
   /// Changements de montant d'une moto, du plus ancien au plus recent (voir
   /// [ScheduleService.montantAu]).
-  Future<List<ChangementMontant>> listerChangementsMontant(int motoId) async {
-    final db = await database;
+  Future<List<ChangementMontant>> listerChangementsMontant(int motoId) async =>
+      _changementsMontant(await database, motoId);
+
+  Future<List<ChangementMontant>> _changementsMontant(DatabaseExecutor db, int motoId) async {
     final lignes = await db.query('montants_moto', where: 'moto_id = ?', whereArgs: [motoId], orderBy: 'depuis ASC');
     return [
       for (final l in lignes) (depuis: DateTime.parse(l['depuis'] as String), montant: (l['montant'] as num).toDouble()),
@@ -936,7 +951,7 @@ class DatabaseService {
   /// Retourne le nombre d'echeances modifiees.
   Future<int> changerMontant(int motoId, double montant, DateTime depuis) => _enFile(() async {
         final db = await database;
-        return db.transaction((txn) async {
+        final modifiees = await db.transaction((txn) async {
           await txn.insert(
             'montants_moto',
             {'moto_id': motoId, 'depuis': ScheduleService.dateSeule(depuis).toIso8601String(), 'montant': montant},
@@ -944,18 +959,22 @@ class DatabaseService {
           );
           return _reappliquerMontant(txn, motoId, depuis);
         });
+        await _normaliser(motoId);
+        return modifiees;
       });
 
   /// Annule le changement de montant du jour [depuis] : sa periode reprend
   /// le montant d'avant (changement precedent, ou montant de depart).
   Future<int> supprimerChangementMontant(int motoId, DateTime depuis) => _enFile(() async {
         final db = await database;
-        return db.transaction((txn) async {
+        final modifiees = await db.transaction((txn) async {
           await txn.delete('montants_moto',
               where: 'moto_id = ? AND depuis = ?',
               whereArgs: [motoId, ScheduleService.dateSeule(depuis).toIso8601String()]);
           return _reappliquerMontant(txn, motoId, depuis);
         });
+        await _normaliser(motoId);
+        return modifiees;
       });
 
   /// Remplace tout l'historique des montants d'une moto (import Excel), sans
@@ -1035,6 +1054,7 @@ class DatabaseService {
       aujourdHui: aujourdHui,
     );
     await _remplacerEcheances(existants.where(deLaPause).toList(), await _nouvellesEcheances(moto, dates));
+    await _normaliser(moto.id!);
   }
 
   /// "Encaisser un versement" (bouton "Ajouter versement") : le montant
@@ -1105,6 +1125,154 @@ class DatabaseService {
       );
       return detteId;
     });
+  }
+
+  /// Remet le compte d'une moto en regle, apres chaque operation qui touche
+  /// l'argent (sans effet si tout est deja en regle) — regles du client :
+  /// 1. un seul versement par periode (voir [ScheduleService.memePeriode]) :
+  ///    une echeance en trop dans une semaine (ou un mois) qui en a deja une
+  ///    est supprimee ; l'argent qu'elle avait recu passe a l'echeance
+  ///    gardee, puis aux suivantes. Une echeance passee en dette n'est
+  ///    jamais supprimee.
+  /// 2. jamais plus que son montant sur une echeance : le surplus est une
+  ///    avance, deduite des echeances suivantes.
+  /// L'argent deplace garde sa date de paiement : le total encaisse et les
+  /// statistiques par date ne changent pas.
+  Future<void> normaliser(int motoId) => _enFile(() => _normaliser(motoId));
+
+  Future<void> _normaliser(int motoId) async {
+    final moto = await obtenirMoto(motoId);
+    if (moto == null) return;
+    final db = await database;
+    await db.transaction((txn) async {
+      final lignes = (await txn.query('versements', where: 'moto_id = ?', whereArgs: [motoId], orderBy: 'date_echeance ASC'))
+          .map(Versement.fromMap)
+          .toList();
+      final aReporter = <({DateTime depuis, List<({DateTime date, double montant})> argent})>[];
+
+      // 1. Un seul versement par periode. "Tous les N jours" : l'historique
+      // a pu suivre un autre rythme, on ne le juge pas.
+      if (moto.frequenceType != AppConstants.freqPersonnalisee) {
+        Versement? gardee;
+        for (final v in [...lignes]) {
+          final doublon = gardee != null &&
+              ScheduleService.memePeriode(gardee.dateEcheance, v.dateEcheance,
+                  type: moto.frequenceType, valeur: moto.frequenceValeur);
+          if (!doublon) {
+            gardee = v;
+          } else if (v.statut == AppConstants.versementEnDette) {
+            continue; // une dette ne disparait jamais
+          } else {
+            final argent = await _retirerArgent(txn, v, ScheduleService.montantPaye(v));
+            await txn.delete('paiements', where: 'versement_id = ?', whereArgs: [v.id]);
+            await txn.delete('versements', where: 'id = ?', whereArgs: [v.id]);
+            lignes.remove(v);
+            if (argent.isNotEmpty) aReporter.add((depuis: gardee.dateEcheance, argent: argent));
+          }
+        }
+      }
+
+      // 2. Jamais plus que son montant sur une echeance.
+      for (final v in lignes) {
+        if (v.statut != AppConstants.versementPaye) continue;
+        final surplus = ScheduleService.montantPaye(v) - v.montantPrevu;
+        if (surplus <= 0) continue;
+        final argent = await _retirerArgent(txn, v, surplus);
+        await txn.update('versements', {'montant_paye': v.montantPrevu}, where: 'id = ?', whereArgs: [v.id]);
+        aReporter.add((depuis: v.dateEcheance, argent: argent));
+      }
+
+      for (final r in aReporter) {
+        await _reporter(txn, moto, r.depuis, r.argent);
+      }
+    });
+  }
+
+  /// Retire [montant] du journal d'une echeance, en commencant par les
+  /// paiements les plus recents ; retourne cet argent avec ses dates.
+  Future<List<({DateTime date, double montant})>> _retirerArgent(Transaction txn, Versement v, double montant) async {
+    final retire = <({DateTime date, double montant})>[];
+    var reste = montant;
+    final paiements =
+        await txn.query('paiements', where: 'versement_id = ?', whereArgs: [v.id], orderBy: 'date DESC, id DESC');
+    for (final p in paiements) {
+      if (reste <= 0) break;
+      final m = (p['montant'] as num).toDouble();
+      final part = m <= reste ? m : reste;
+      if (part == m) {
+        await txn.delete('paiements', where: 'id = ?', whereArgs: [p['id']]);
+      } else {
+        await txn.update('paiements', {'montant': m - part}, where: 'id = ?', whereArgs: [p['id']]);
+      }
+      retire.add((date: DateTime.parse(p['date'] as String), montant: part));
+      reste -= part;
+    }
+    // Ancienne echeance sans journal : l'argent date de sa validation.
+    if (reste > 0) retire.add((date: v.dateValidation ?? v.dateEcheance, montant: reste));
+    return retire;
+  }
+
+  /// Paie avec [argent] les echeances a partir du jour [depuis] (voir
+  /// [ScheduleService.affecterVersement]), en creant au rythme de la moto
+  /// celles qui n'existent pas encore. Chaque part garde la date de son
+  /// paiement d'origine.
+  Future<void> _reporter(
+      Transaction txn, Moto moto, DateTime depuis, List<({DateTime date, double montant})> argent) async {
+    final total = argent.fold<double>(0, (t, a) => t + a.montant);
+    if (total <= 0) return;
+    final existants = (await txn.query('versements', where: 'moto_id = ?', whereArgs: [moto.id]))
+        .map(Versement.fromMap)
+        .toList();
+    final changements = await _changementsMontant(txn, moto.id!);
+    final aujourdHui = ScheduleService.aujourdHui();
+    final affectations = ScheduleService.affecterVersement(
+      moto: moto,
+      existants: existants,
+      changements: changements,
+      aujourdHui: aujourdHui,
+      montant: total,
+      depuis: depuis,
+    );
+    final sources = [...argent];
+    for (final a in affectations) {
+      final existante = existants
+          .where((v) => ScheduleService.dateSeule(v.dateEcheance) == a.date && v.statut != AppConstants.versementEnDette)
+          .firstOrNull;
+      final id = existante?.id ??
+          await txn.insert(
+            'versements',
+            Versement(
+              motoId: moto.id!,
+              dateEcheance: a.date,
+              montantPrevu: ScheduleService.montantAu(moto, changements, a.date),
+              statut: a.date.isBefore(aujourdHui) ? AppConstants.versementEnRetard : AppConstants.versementEnAttente,
+            ).toMap()
+              ..remove('id'),
+          );
+      var aPayer = a.montant;
+      while (aPayer > 0 && sources.isNotEmpty) {
+        final s = sources.first;
+        final part = s.montant <= aPayer ? s.montant : aPayer;
+        await txn.insert('paiements', {'versement_id': id, 'moto_id': moto.id, 'montant': part, 'date': s.date.toIso8601String()});
+        final ligne = Versement.fromMap((await txn.query('versements', where: 'id = ?', whereArgs: [id])).first);
+        await txn.update(
+          'versements',
+          {
+            'statut': AppConstants.versementPaye,
+            'montant_paye': (ligne.montantPaye ?? 0) + part,
+            'date_validation': s.date.toIso8601String(),
+          },
+          where: 'id = ?',
+          whereArgs: [id],
+        );
+        aPayer -= part;
+        if (part == s.montant) {
+          sources.removeAt(0);
+        } else {
+          sources[0] = (date: s.date, montant: s.montant - part);
+        }
+      }
+    }
   }
 
   /// Echeances a inserer pour ces dates, au montant en vigueur a chacune,

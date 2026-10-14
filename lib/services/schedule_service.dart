@@ -93,14 +93,14 @@ class ScheduleService {
   /// payées à partir d'aujourd'hui. Les dates déjà passées sont créées aussi
   /// (elles deviennent des retards) : le retard d'un chauffeur qui ne paie
   /// plus continue donc de grossir au lieu de s'arrêter à 4 échéances.
-  /// Jamais deux échéances dans la même période (règle de transition) :
-  /// une date n'est créée que si sa période ne chevauche celle d'aucune
-  /// échéance conservée (payées, retards, dettes). Chaque échéance conservée
-  /// couvre jusqu'à la suivante ; la dernière, sur la durée de l'ancien
-  /// rythme (voir [_finCouverture]). Ex : lundi 14/09 dû, passage au
-  /// mercredi -> premier mercredi le 23/09, pas le 16/09. Vaut pour tout
-  /// changement (jour, fréquence, date de début, reprise après pause) :
-  /// jamais de paiement redemandé ni de semaine comptée deux fois.
+  /// Un seul versement par période (règle du client) : par semaine du
+  /// calendrier (lundi -> dimanche) en hebdomadaire, par mois en mensuel, et
+  /// au moins N jours d'écart en "tous les N jours". Une date dont la
+  /// période a déjà une échéance (payée, retard, dette, ou créée juste
+  /// avant) est sautée : ex. lundi 14/09 dû, passage au vendredi -> premier
+  /// vendredi le 25/09, pas le 18/09. Vaut pour tout changement (jour,
+  /// fréquence, date de début, reprise après pause) : jamais de paiement
+  /// redemandé ni de semaine comptée deux fois.
   static List<DateTime> datesAGenerer({
     required List<Versement> existants,
     required DateTime premiere,
@@ -128,64 +128,52 @@ class ScheduleService {
     required int valeur,
   }) sync* {
     final occupees = existants.map((v) => dateSeule(v.dateEcheance)).toSet().toList()..sort();
-    final finDerniere = occupees.isEmpty
-        ? null
-        : occupees.length >= 2
-            ? _finCouverture(occupees[occupees.length - 2], occupees.last)
-            : echeanceSuivante(dateActuelle: occupees.last, type: type, valeur: valeur);
-
+    // "Tous les N jours" : la derniere echeance gardee suivait l'ancien rythme
+    // (son ecart avec la precedente), pas les N jours du nouveau.
+    final ancienRythme = occupees.length >= 2 ? _jours(occupees[occupees.length - 2], occupees.last) : null;
     DateTime? precedente;
-    bool chevauche(DateTime d) {
-      // Une nouvelle echeance ne tombe pas non plus dans la periode de la
-      // precedente (ex : debut un jeudi, versement le lundi -> pas le lundi
-      // 4 jours apres, mais celui d'apres).
-      if (precedente != null && d.isBefore(finPeriode(precedente, type: type, valeur: valeur))) return true;
-      final finD = finPeriode(d, type: type, valeur: valeur);
-      for (var i = 0; i < occupees.length; i++) {
-        final fin = i + 1 < occupees.length ? occupees[i + 1] : finDerniere!;
-        if (d.isBefore(fin) && occupees[i].isBefore(finD)) return true;
+    bool dejaPrise(DateTime d) {
+      if (precedente != null && memePeriode(d, precedente, type: type, valeur: valeur)) return true;
+      for (final o in occupees) {
+        if (type == AppConstants.freqPersonnalisee && ancienRythme != null && o == occupees.last && d.isAfter(o)) {
+          if (_jours(o, d) < ancienRythme) return true;
+        } else if (memePeriode(d, o, type: type, valeur: valeur)) {
+          return true;
+        }
       }
       return false;
     }
 
     for (var d = dateSeule(premiere);; d = echeanceSuivante(dateActuelle: d, type: type, valeur: valeur)) {
-      if (chevauche(d)) continue;
+      if (dejaPrise(d)) continue;
       precedente = d;
       yield d;
     }
   }
 
-  /// Fin (exclue) de la période couverte par une échéance du jour [d] : une
-  /// semaine, un mois (même jour, ajusté au mois court) ou l'intervalle
-  /// choisi, quel que soit le jour de [d].
-  static DateTime finPeriode(DateTime d, {required String type, required int valeur}) {
-    final j = dateSeule(d);
+  /// Deux dates dans la même période de versement (un seul versement par
+  /// période) : même semaine du calendrier (lundi -> dimanche) en
+  /// hebdomadaire, même mois en mensuel, moins de [valeur] jours d'écart en
+  /// "tous les N jours".
+  static bool memePeriode(DateTime a, DateTime b, {required String type, required int valeur}) {
+    final x = dateSeule(a);
+    final y = dateSeule(b);
     switch (type) {
       case AppConstants.freqHebdomadaire:
-        return DateTime(j.year, j.month, j.day + 7);
+        DateTime lundi(DateTime d) => DateTime(d.year, d.month, d.day - (d.weekday - 1));
+        return lundi(x) == lundi(y);
       case AppConstants.freqMensuelle:
-        return _jourDuMois(j.year, j.month + 1, j.day);
+        return x.year == y.year && x.month == y.month;
       case AppConstants.freqPersonnalisee:
       default:
-        return DateTime(j.year, j.month, j.day + (valeur < 1 ? 1 : valeur));
+        return _jours(x, y) < (valeur < 1 ? 1 : valeur);
     }
   }
 
-  /// Fin de la période couverte par la dernière échéance [derniere], au
-  /// rythme qu'elle suivait (l'écart avec la précédente) : un mois plus tard
-  /// si les deux tombent le même jour de deux mois qui se suivent, sinon le
-  /// même nombre de jours.
-  static DateTime _finCouverture(DateTime precedente, DateTime derniere) {
-    final moisSuivant = DateTime(precedente.year, precedente.month + 1, precedente.day);
-    if (precedente.day == derniere.day && moisSuivant == derniere) {
-      return _jourDuMois(derniere.year, derniere.month + 1, derniere.day);
-    }
-    // Jours calendaires (en UTC : pas d'erreur d'un jour au changement d'heure).
-    final jours = DateTime.utc(derniere.year, derniere.month, derniere.day)
-        .difference(DateTime.utc(precedente.year, precedente.month, precedente.day))
-        .inDays;
-    return DateTime(derniere.year, derniere.month, derniere.day + jours);
-  }
+  /// Jours calendaires entre deux dates (en UTC : pas d'erreur d'un jour au
+  /// changement d'heure).
+  static int _jours(DateTime a, DateTime b) =>
+      DateTime.utc(b.year, b.month, b.day).difference(DateTime.utc(a.year, a.month, a.day)).inDays.abs();
 
   /// Échéance encore attendue (ni payée, ni passée en dette) à partir d'aujourd'hui.
   static bool _estAVenir(Versement v, DateTime aujourdHui) =>
@@ -312,6 +300,8 @@ class ScheduleService {
   /// (avance). Jamais plus que son montant sur une echeance : la fiche et la
   /// relance restent d'accord quand ces periodes arrivent. Seul calcul d'un
   /// versement : l'apercu a l'ecran et l'enregistrement passent par ici.
+  /// [depuis] : seulement les periodes a partir de ce jour (report d'une
+  /// avance sur les echeances suivantes).
   static List<({DateTime date, double montant})> affecterVersement({
     required Moto moto,
     required List<Versement> existants,
@@ -319,9 +309,11 @@ class ScheduleService {
     required DateTime aujourdHui,
     required double montant,
     Set<DateTime>? choisies,
+    DateTime? depuis,
   }) {
     final univers = periodesAPayer(existants: existants, moto: moto, aujourdHui: aujourdHui)
-        .followedBy(_periodesSuivantes(moto, existants, changements));
+        .followedBy(_periodesSuivantes(moto, existants, changements))
+        .where((p) => depuis == null || !p.date.isBefore(dateSeule(depuis)));
     final selection = (choisies == null || choisies.isEmpty) ? null : choisies.map(dateSeule).toSet();
     final derniere = selection?.reduce((a, b) => a.isAfter(b) ? a : b);
 

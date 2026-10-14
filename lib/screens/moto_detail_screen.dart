@@ -105,7 +105,11 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
             TextField(
               controller: controleur,
               keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: 'Montant verse'),
+              decoration: const InputDecoration(
+                labelText: 'Montant verse',
+                helperText: 'Au-dela du montant prevu : avance deduite des echeances suivantes',
+                helperMaxLines: 2,
+              ),
             ),
             const SizedBox(height: 4),
             Text('Modifiable si le chauffeur a verse un montant different',
@@ -472,7 +476,11 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
             TextField(
               controller: controleur,
               keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: 'Montant verse'),
+              decoration: const InputDecoration(
+                labelText: 'Montant verse',
+                helperText: 'Au-dela du montant prevu : avance deduite des echeances suivantes',
+                helperMaxLines: 2,
+              ),
             ),
           ],
         ),

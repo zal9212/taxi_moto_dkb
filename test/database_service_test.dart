@@ -146,21 +146,22 @@ void main() {
 
     test('applique depuis sa date de mise en vigueur, meme aux periodes passees ou payees', () async {
       final motoId = await nouvelleMoto();
-      Future<void> echeance(int jour, String statut, {double? paye}) => db.insererVersement(Versement(
-          motoId: motoId, dateEcheance: DateTime(2026, 9, jour), montantPrevu: 50000, montantPaye: paye, statut: statut));
-      await echeance(7, AppConstants.versementPaye, paye: 50000); // avant la date : ancien montant
-      await echeance(14, AppConstants.versementPaye, paye: 50000); // payee a l'ancien montant
-      await echeance(15, AppConstants.versementPaye); // ancien import : payee sans montant
-      await echeance(21, AppConstants.versementEnRetard);
-      await echeance(28, AppConstants.versementEnDette); // la dette garde son montant
-      await echeance(30, AppConstants.versementEnAttente);
+      // Un lundi par semaine (regle : un seul versement par semaine).
+      Future<void> echeance(int mois, int jour, String statut, {double? paye}) => db.insererVersement(Versement(
+          motoId: motoId, dateEcheance: DateTime(2026, mois, jour), montantPrevu: 50000, montantPaye: paye, statut: statut));
+      await echeance(9, 7, AppConstants.versementPaye, paye: 50000); // avant la date : ancien montant
+      await echeance(9, 14, AppConstants.versementPaye, paye: 50000); // payee a l'ancien montant
+      await echeance(9, 21, AppConstants.versementPaye); // ancien import : payee sans montant
+      await echeance(9, 28, AppConstants.versementEnRetard);
+      await echeance(10, 5, AppConstants.versementEnDette); // la dette garde son montant
+      await echeance(10, 12, AppConstants.versementEnAttente);
 
       expect(await db.changerMontant(motoId, 60000, DateTime(2026, 9, 14, 15, 30)), 4);
 
-      expect(await montantsParJour(motoId), {7: 50000, 14: 60000, 15: 60000, 21: 60000, 28: 50000, 30: 60000});
+      expect(await montantsParJour(motoId), {7: 50000, 14: 60000, 21: 60000, 28: 60000, 5: 50000, 12: 60000});
       final parJour = {for (final v in await db.listerVersementsParMoto(motoId)) v.dateEcheance.day: v};
       expect(parJour[14]!.montantPaye, 50000); // reste 10000 a payer sur cette periode
-      expect(parJour[15]!.montantPaye, 50000);
+      expect(parJour[21]!.montantPaye, 50000);
       expect(await db.listerChangementsMontant(motoId), [(depuis: DateTime(2026, 9, 14), montant: 60000.0)]);
       // Le montant de depart de la moto ne bouge pas.
       expect((await db.obtenirMoto(motoId))!.montantVersement, 50000);
@@ -631,10 +632,13 @@ void main() {
 
     Future<void> verifier(String etape) async {
       final echeances = (await db.listerVersementsParMoto(moto.id!)).map((v) => v.dateEcheance).toList()..sort();
-      // 1. Jamais deux echeances dans la meme periode (tous les rythmes ici durent 7 jours ou plus).
+      // 1. Un seul versement par semaine du calendrier (tous les rythmes ici : une semaine ou plus).
       for (var i = 1; i < echeances.length; i++) {
-        expect(echeances[i].difference(echeances[i - 1]).inDays, greaterThanOrEqualTo(7),
-            reason: '$etape : ${echeances[i - 1]} et ${echeances[i]} dans la meme periode');
+        expect(
+            ScheduleService.memePeriode(echeances[i - 1], echeances[i],
+                type: AppConstants.freqHebdomadaire, valeur: DateTime.monday),
+            isFalse,
+            reason: '$etape : ${echeances[i - 1]} et ${echeances[i]} dans la meme semaine');
       }
       // 5. Jamais plus que son montant sur une echeance (un surplus va aux periodes suivantes).
       for (final v in await db.listerVersementsParMoto(moto.id!)) {
@@ -679,7 +683,8 @@ void main() {
 
     await verifier('creation');
     await encaisser('premier paiement', 400000);
-    await changerPlan('lundi -> mercredi', moto.copyWith(frequenceValeur: DateTime.wednesday));
+    await changerPlan('lundi -> vendredi', moto.copyWith(frequenceValeur: DateTime.friday));
+    await changerPlan('vendredi -> mercredi', moto.copyWith(frequenceValeur: DateTime.wednesday));
     await changerPlan(
         'date de debut avancee + vendredi',
         moto.copyWith(
@@ -697,6 +702,20 @@ void main() {
         .lastWhere((v) => v.statut == AppConstants.versementEnRetard);
     await db.marquerEnDette(unRetard, moto);
     await verifier('retard passe en dette');
+    await db.changerMontant(moto.id!, 150000, aujourdHui.subtract(const Duration(days: 20)));
+    await verifier('montant baisse : le trop-paye devient de l\'avance');
+    final aValider = (await db.listerVersementsParMoto(moto.id!)).firstWhere(
+        (v) => v.statut == AppConstants.versementEnRetard || v.statut == AppConstants.versementEnAttente);
+    await db.validerVersement(aValider.id!, montantPaye: aValider.montantPrevu + 100000);
+    encaisse += aValider.montantPrevu + 100000;
+    await db.assurerEcheances(moto); // comme la fiche moto au rechargement
+    await verifier('valider avec 100 000 de plus');
+    final aCorriger = (await db.listerVersementsParMoto(moto.id!))
+        .firstWhere((v) => v.statut == AppConstants.versementPaye && (v.montantPaye ?? 0) > 0);
+    await db.modifierMontantPaye(aCorriger.id!, aCorriger.montantPaye! + 50000);
+    encaisse += 50000;
+    await db.assurerEcheances(moto); // comme la fiche moto au rechargement
+    await verifier('corriger un paiement a la hausse');
     moto = moto.copyWith(statut: AppConstants.motoSuspendue);
     await db.modifierMoto(moto);
     await verifier('suspendue');
@@ -766,6 +785,87 @@ void main() {
     expect(relance, greaterThan(0));
     expect(fiche.retard, relance);
     expect((await db.comptesMotosActives())[moto.id], fiche);
+  });
+
+  group('regles du client : un versement par periode, l\'argent en trop devient de l\'avance', () {
+    Future<int> echeanceDe(int motoId, DateTime date, {double paye = 0, String? statut}) => db.insererVersement(Versement(
+          motoId: motoId,
+          dateEcheance: date,
+          dateValidation: paye > 0 ? date : null,
+          montantPrevu: 50000,
+          montantPaye: paye > 0 ? paye : null,
+          statut: statut ?? (paye > 0 ? AppConstants.versementPaye : AppConstants.versementEnRetard),
+        ));
+    Future<Map<DateTime, Versement>> parDate(int motoId) async =>
+        {for (final v in await db.listerVersementsParMoto(motoId)) v.dateEcheance: v};
+
+    test('doublon dans la meme semaine (lundi 14/09 + mercredi 16/09) : le second disparait, rien n\'est perdu', () async {
+      final moto = (await db.obtenirMoto(await nouvelleMoto()))!.copyWith(frequenceValeur: DateTime.wednesday);
+      await db.modifierMoto(moto);
+      await echeanceDe(moto.id!, DateTime(2026, 9, 14));
+      await echeanceDe(moto.id!, DateTime(2026, 9, 16));
+      await echeanceDe(moto.id!, DateTime(2026, 9, 23));
+
+      await db.normaliser(moto.id!);
+
+      expect((await parDate(moto.id!)).keys.toList()..sort(), [DateTime(2026, 9, 14), DateTime(2026, 9, 23)]);
+    });
+
+    test('doublon deja paye : son argent passe a l\'echeance gardee de la semaine, a sa date de paiement', () async {
+      final moto = (await db.obtenirMoto(await nouvelleMoto()))!;
+      await echeanceDe(moto.id!, DateTime(2026, 9, 14));
+      await echeanceDe(moto.id!, DateTime(2026, 9, 16), paye: 50000);
+      final encaisse = await db.totalEncaisse(motoId: moto.id!);
+
+      await db.normaliser(moto.id!);
+
+      final v = await parDate(moto.id!);
+      expect(v.containsKey(DateTime(2026, 9, 16)), isFalse);
+      expect((v[DateTime(2026, 9, 14)]!.statut, v[DateTime(2026, 9, 14)]!.montantPaye), (AppConstants.versementPaye, 50000));
+      expect(await db.totalEncaisse(motoId: moto.id!), encaisse);
+      // L'argent garde sa vraie date : le 16/09.
+      expect(await db.totalEncaisse(motoId: moto.id!, debut: DateTime(2026, 9, 16), fin: DateTime(2026, 9, 16, 23)), 50000);
+    });
+
+    test('valider avec plus que le montant : le surplus est une avance deduite des echeances suivantes', () async {
+      final moto = (await db.obtenirMoto(await nouvelleMoto()))!;
+      final quatorze = await echeanceDe(moto.id!, DateTime(2026, 9, 14));
+      await echeanceDe(moto.id!, DateTime(2026, 9, 21));
+      await echeanceDe(moto.id!, DateTime(2026, 9, 28));
+
+      await db.validerVersement(quatorze, montantPaye: 120000);
+
+      final v = await parDate(moto.id!);
+      expect(v[DateTime(2026, 9, 14)]!.montantPaye, 50000);
+      expect(v[DateTime(2026, 9, 21)]!.montantPaye, 50000);
+      expect(v[DateTime(2026, 9, 28)]!.montantPaye, 20000);
+      expect(await db.totalEncaisse(motoId: moto.id!), 120000);
+    });
+
+    test('corriger un montant paye a la hausse : le surplus va a l\'echeance suivante', () async {
+      final moto = (await db.obtenirMoto(await nouvelleMoto()))!;
+      final quatorze = await echeanceDe(moto.id!, DateTime(2026, 9, 14), paye: 50000);
+      await echeanceDe(moto.id!, DateTime(2026, 9, 21));
+
+      await db.modifierMontantPaye(quatorze, 80000);
+
+      final v = await parDate(moto.id!);
+      expect((v[DateTime(2026, 9, 14)]!.montantPaye, v[DateTime(2026, 9, 21)]!.montantPaye), (50000, 30000));
+      expect(await db.totalEncaisse(motoId: moto.id!), 80000);
+    });
+
+    test('baisser le montant : ce qui a ete paye en trop devient de l\'avance sur la suite', () async {
+      final moto = (await db.obtenirMoto(await nouvelleMoto()))!;
+      await echeanceDe(moto.id!, DateTime(2026, 9, 14), paye: 50000);
+      await echeanceDe(moto.id!, DateTime(2026, 9, 21), paye: 50000);
+      await echeanceDe(moto.id!, DateTime(2026, 9, 28));
+
+      await db.changerMontant(moto.id!, 40000, DateTime(2026, 9, 14));
+
+      final v = await parDate(moto.id!);
+      expect([for (final d in [14, 21, 28]) v[DateTime(2026, 9, d)]!.montantPaye], [40000, 40000, 20000]);
+      expect(await db.totalEncaisse(motoId: moto.id!), 100000);
+    });
   });
 
   group('echeance marquee en dette', () {

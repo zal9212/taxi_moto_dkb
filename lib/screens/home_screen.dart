@@ -95,6 +95,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     for (final m in motos.where((m) => m.statut == AppConstants.motoActive)) {
       await NotificationService.assurerEcheancesEtRappels(m);
     }
+    // Les motos hors service suivent les memes regles d'argent (doublons,
+    // trop-payes) ; les actives le font dans assurerEcheances.
+    for (final m in motos.where((m) => m.statut != AppConstants.motoActive && m.id != null)) {
+      await _db.normaliser(m.id!);
+    }
     final totalEncaisse = await _db.totalEncaisse(
       motoId: _motoFiltreId,
       debut: bornes.debut,
