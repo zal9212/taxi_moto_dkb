@@ -122,6 +122,10 @@ class ScheduleService {
   /// Dates passées de la fréquence, à partir de [depuis], qui n'ont aucune
   /// échéance (oubliées au début ou au milieu de l'historique), pour les
   /// ajouter à la main — rien n'est supprimé ni déplacé.
+  /// Une échéance hors de la grille actuelle vient d'un ancien plan (jour,
+  /// fréquence ou date de début changés) : jusqu'à elle, l'historique suit
+  /// cet ancien plan et la grille actuelle n'y dit rien (sinon une semaine
+  /// payée le lundi serait redemandée le mercredi).
   static List<DateTime> datesManquantes({
     required List<Versement> existants,
     required DateTime depuis,
@@ -130,11 +134,26 @@ class ScheduleService {
     required DateTime aujourdHui,
   }) {
     final occupees = existants.map((v) => dateSeule(v.dateEcheance)).toSet();
-    return [
+    final fin = occupees.fold(aujourdHui, (f, d) => d.isAfter(f) ? d : f);
+    final grille = [
       for (var d = premiereEcheance(dateDebut: depuis, type: type, valeur: valeur);
-          d.isBefore(aujourdHui);
+          !d.isAfter(fin);
           d = echeanceSuivante(dateActuelle: d, type: type, valeur: valeur))
-        if (!occupees.contains(d)) d,
+        d,
+    ];
+    final surGrille = grille.toSet();
+    DateTime? dernierAncienPlan;
+    for (final d in occupees) {
+      if (!surGrille.contains(d) && (dernierAncienPlan == null || d.isAfter(dernierAncienPlan))) {
+        dernierAncienPlan = d;
+      }
+    }
+    return [
+      for (final d in grille)
+        if (d.isBefore(aujourdHui) &&
+            !occupees.contains(d) &&
+            (dernierAncienPlan == null || d.isAfter(dernierAncienPlan)))
+          d,
     ];
   }
 

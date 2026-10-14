@@ -285,6 +285,27 @@ void main() {
       ]);
     });
 
+    test('jour change (lundi -> mercredi) : les semaines payees le lundi ne sont pas redemandees le mercredi', () {
+      // Lundis jusqu'au 14/09, puis passage au mercredi a partir du 16/09 ; le 23/09 a ete oublie.
+      List<DateTime> manquantes(List<Versement> existants) => ScheduleService.datesManquantes(
+            existants: existants,
+            depuis: DateTime(2026, 8, 31),
+            type: hebdo,
+            valeur: DateTime.wednesday,
+            aujourdHui: aujourdHui,
+          );
+      final existants = [
+        echeance(DateTime(2026, 8, 31), paye),
+        echeance(DateTime(2026, 9, 7), paye),
+        echeance(DateTime(2026, 9, 14), enRetard),
+        echeance(DateTime(2026, 9, 16), enRetard),
+        echeance(DateTime(2026, 9, 30), enRetard),
+        echeance(DateTime(2026, 10, 7), enAttente),
+      ];
+
+      expect(manquantes(existants), [DateTime(2026, 9, 23)]);
+    });
+
     test('trouve aussi celles d\'avant la premiere echeance, et jamais de date future', () {
       expect(
         ScheduleService.datesManquantes(
