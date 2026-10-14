@@ -17,8 +17,6 @@ class AppColors {
   static const Color succesFond = Color(0xFFDFF0C2);
   static const Color danger = Color(0xFFA33333);
   static const Color dangerFond = Color(0xFFFBE0DD);
-  static const Color avertissement = Color(0xFFB5860A);
-  static const Color avertissementFond = Color(0xFFFBEFD9);
 }
 
 class AppTheme {
