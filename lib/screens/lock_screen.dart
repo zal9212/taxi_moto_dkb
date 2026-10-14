@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../core/theme.dart';
+import '../widgets/clavier_pin.dart';
 import '../services/auth_service.dart';
 import '../services/database_service.dart';
 import 'categorie/categorie_home_screen.dart';
@@ -232,7 +233,7 @@ class _LockScreenState extends State<LockScreen> {
                       const SizedBox(height: 12),
                       Opacity(
                         opacity: verrouille ? 0.3 : 1,
-                        child: IgnorePointer(ignoring: verrouille, child: _clavierNumerique()),
+                        child: IgnorePointer(ignoring: verrouille, child: ClavierPin(onChiffre: _ajouterChiffre, onEffacer: _effacer)),
                       ),
                       const SizedBox(height: 12),
                     ],
@@ -243,25 +244,6 @@ class _LockScreenState extends State<LockScreen> {
           },
         ),
       ),
-    );
-  }
-
-  Widget _clavierNumerique() {
-    final touches = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', '<'];
-    return GridView.count(
-      crossAxisCount: 3,
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      childAspectRatio: 1.6,
-      children: touches.map((t) {
-        if (t.isEmpty) return const SizedBox.shrink();
-        return TextButton(
-          onPressed: () => t == '<' ? _effacer() : _ajouterChiffre(t),
-          child: t == '<'
-              ? const Icon(Icons.backspace_outlined, color: Colors.white, size: 20)
-              : Text(t, style: const TextStyle(color: Colors.white, fontSize: 22)),
-        );
-      }).toList(),
     );
   }
 }

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../core/theme.dart';
+import '../widgets/clavier_pin.dart';
 import '../services/auth_service.dart';
 
 /// Configuration initiale du code PIN (obligatoire une fois) puis
@@ -131,7 +132,7 @@ class _SetupPinScreenState extends State<SetupPinScreen> {
                         }),
                       ),
                       const Spacer(),
-                      _clavierNumerique(),
+                      ClavierPin(onChiffre: _ajouterChiffre, onEffacer: _effacer),
                       const SizedBox(height: 12),
                     ],
                   ),
@@ -141,25 +142,6 @@ class _SetupPinScreenState extends State<SetupPinScreen> {
           },
         ),
       ),
-    );
-  }
-
-  Widget _clavierNumerique() {
-    final touches = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', '<'];
-    return GridView.count(
-      crossAxisCount: 3,
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      childAspectRatio: 1.6,
-      children: touches.map((t) {
-        if (t.isEmpty) return const SizedBox.shrink();
-        return TextButton(
-          onPressed: () => t == '<' ? _effacer() : _ajouterChiffre(t),
-          child: t == '<'
-              ? const Icon(Icons.backspace_outlined, color: Colors.white, size: 20)
-              : Text(t, style: const TextStyle(color: Colors.white, fontSize: 22)),
-        );
-      }).toList(),
     );
   }
 }
