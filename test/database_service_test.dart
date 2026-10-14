@@ -502,11 +502,11 @@ void main() {
 
     test('le remboursement ne change pas le retard ou l\'avance du chauffeur sur ses versements', () async {
       final moto = await nouvelleMoto();
-      final avant = await db.soldeNet(motoId: moto);
+      final avant = await db.compteMoto(motoId: moto);
 
       await rembourser(await nouvelleDette(lienType: AppConstants.detteLienMoto, lienId: moto), 30000, DateTime(2026, 9, 10));
 
-      expect(await db.soldeNet(motoId: moto), avant);
+      expect(await db.compteMoto(motoId: moto), avant);
     });
 
     test('les statistiques par periode et l\'activite recente incluent le remboursement', () async {
@@ -556,7 +556,7 @@ void main() {
       final moto = await nouvelleMoto();
       await echeance(moto, aujourdHui);
 
-      expect(await db.soldeNet(motoId: moto), 0);
+      expect(await db.compteMoto(motoId: moto), (retard: 0.0, avance: 0.0));
     });
 
     test('le retard global ignore les motos suspendues et l\'avance d\'une moto ne compense pas une autre', () async {
@@ -567,9 +567,9 @@ void main() {
       await echeance(enAvance, DateTime(2026, 9, 1), paye: 80000);
       await echeance(suspendue, DateTime(2026, 9, 1), prevu: 300000, paye: 300000);
 
-      final soldes = await db.soldesMotosActives();
+      final comptes = await db.comptesMotosActives();
 
-      expect(soldes, {enRetard: -50000, enAvance: 30000});
+      expect(comptes, {enRetard: (retard: 50000.0, avance: 0.0), enAvance: (retard: 0.0, avance: 30000.0)});
     });
   });
 
@@ -636,18 +636,23 @@ void main() {
         expect(echeances[i].difference(echeances[i - 1]).inDays, greaterThanOrEqualTo(7),
             reason: '$etape : ${echeances[i - 1]} et ${echeances[i]} dans la meme periode');
       }
+      // 5. Jamais plus que son montant sur une echeance (un surplus va aux periodes suivantes).
+      for (final v in await db.listerVersementsParMoto(moto.id!)) {
+        expect((v.montantPaye ?? 0) <= v.montantPrevu, isTrue,
+            reason: '$etape : ${v.dateEcheance} payee ${v.montantPaye} pour ${v.montantPrevu}');
+      }
       // 2. Rien de deja paye n'est perdu ni compte deux fois.
       expect(await db.totalEncaisse(motoId: moto.id!), encaisse, reason: etape);
       // 3. Fiche, accueil et relance disent la meme chose.
-      final fiche = await db.soldeNet(motoId: moto.id!);
+      final fiche = await db.compteMoto(motoId: moto.id!);
       final relance = ScheduleService.periodesAPayer(
         existants: await db.listerVersementsParMoto(moto.id!),
         moto: moto,
         aujourdHui: aujourdHui,
       ).where((p) => p.date.isBefore(aujourdHui)).fold<double>(0, (t, p) => t + p.reste);
-      expect(relance, fiche < 0 ? -fiche : 0, reason: '$etape : relance $relance, fiche $fiche');
+      expect(relance, fiche.retard, reason: '$etape : relance $relance, fiche $fiche');
       if (moto.statut == AppConstants.motoActive) {
-        expect((await db.soldesMotosActives())[moto.id], fiche, reason: etape);
+        expect((await db.comptesMotosActives())[moto.id], fiche, reason: etape);
         // 4. Toujours les prochaines echeances a venir.
         expect(
             (await db.listerVersementsParMoto(moto.id!))
@@ -665,8 +670,8 @@ void main() {
       await verifier(etape);
     }
 
-    Future<void> encaisser(String etape, double montant) async {
-      await db.encaisser(moto, montant);
+    Future<void> encaisser(String etape, double montant, {Set<DateTime>? choisies}) async {
+      await db.encaisser(moto, montant, choisies: choisies);
       encaisse += montant;
       await db.assurerEcheances(moto); // comme la fiche moto au rechargement
       await verifier(etape);
@@ -699,7 +704,42 @@ void main() {
     await db.modifierMoto(moto);
     await db.redemarrerEcheancesApresReactivation(moto);
     await verifier('reactivee');
+    final futures = ScheduleService.periodesChoisissables(
+            moto: moto,
+            existants: await db.listerVersementsParMoto(moto.id!),
+            changements: await db.listerChangementsMontant(moto.id!),
+            aujourdHui: aujourdHui)
+        .where((p) => p.date.isAfter(aujourdHui))
+        .toList();
+    await encaisser('versement sur 2 periodes choisies (dont une pas encore creee)', futures.first.reste + futures.last.reste,
+        choisies: {futures.first.date, futures.last.date});
     await encaisser('gros paiement (avance)', 2000000);
+  });
+
+  test('ajouter versement : periodes choisies, une future creee au rythme, journal et solde a jour', () async {
+    final moto = (await db.obtenirMoto(await nouvelleMoto()))!;
+    await db.assurerEcheances(moto);
+    final avant = await db.compteMoto(motoId: moto.id!);
+    final periodes = ScheduleService.periodesChoisissables(
+        moto: moto,
+        existants: await db.listerVersementsParMoto(moto.id!),
+        changements: const [],
+        aujourdHui: ScheduleService.aujourdHui());
+    final futureNonCreee = periodes.last.date; // au-dela des echeances deja creees
+    expect((await db.listerVersementsParMoto(moto.id!)).any((v) => v.dateEcheance == futureNonCreee), isFalse);
+
+    final affectations = await db.encaisser(moto, 100000, choisies: {periodes.first.date, futureNonCreee});
+
+    expect(affectations.map((a) => (a.date, a.montant)), [(periodes.first.date, 50000), (futureNonCreee, 50000)]);
+    final apres = await db.listerVersementsParMoto(moto.id!);
+    final creee = apres.singleWhere((v) => v.dateEcheance == futureNonCreee);
+    expect((creee.statut, creee.montantPaye, creee.montantPrevu), (AppConstants.versementPaye, 50000, 50000));
+    expect(await db.totalEncaisse(motoId: moto.id!), 100000);
+    // Une periode due payee (-50 000 de retard) et une d'avance (+50 000).
+    expect(await db.compteMoto(motoId: moto.id!), (retard: avant.retard - 50000, avance: avant.avance + 50000));
+    // Le roulement ne recree rien dans la periode payee d'avance.
+    await db.assurerEcheances(moto);
+    expect((await db.listerVersementsParMoto(moto.id!)).where((v) => v.dateEcheance == futureNonCreee).length, 1);
   });
 
   test('coherence : fiche, accueil et relance donnent le meme du apres changement de jour, paiement et dette', () async {
@@ -721,11 +761,11 @@ void main() {
       moto: moto,
       aujourdHui: aujourdHui,
     ).where((p) => p.date.isBefore(aujourdHui)).fold<double>(0, (t, p) => t + p.reste);
-    final fiche = await db.soldeNet(motoId: moto.id!);
+    final fiche = await db.compteMoto(motoId: moto.id!);
 
     expect(relance, greaterThan(0));
-    expect(fiche, -relance);
-    expect((await db.soldesMotosActives())[moto.id], fiche);
+    expect(fiche.retard, relance);
+    expect((await db.comptesMotosActives())[moto.id], fiche);
   });
 
   group('echeance marquee en dette', () {
@@ -742,7 +782,7 @@ void main() {
     test('la dette apparait dans Dettes, liee a la moto, et ne compte plus dans le retard', () async {
       final moto = (await db.obtenirMoto(await nouvelleMoto()))!;
       final v = await retard(moto.id!, DateTime(2026, 9, 14));
-      expect(await db.soldeNet(motoId: moto.id!), -50000);
+      expect((await db.compteMoto(motoId: moto.id!)).retard, 50000);
 
       final detteId = await db.marquerEnDette(v, moto);
 
@@ -753,8 +793,8 @@ void main() {
       final apres = (await db.listerVersementsParMoto(moto.id!)).single;
       expect(apres.statut, AppConstants.versementEnDette);
       expect(apres.detteId, detteId);
-      expect(await db.soldeNet(motoId: moto.id!), 0);
-      expect(await db.soldesMotosActives(motoId: moto.id), {moto.id!: 0});
+      expect(await db.compteMoto(motoId: moto.id!), (retard: 0.0, avance: 0.0));
+      expect(await db.comptesMotosActives(motoId: moto.id), {moto.id!: (retard: 0.0, avance: 0.0)});
       expect(await db.prochainVersement(moto.id!), isNull);
     });
 
@@ -767,7 +807,7 @@ void main() {
       final v = (await db.listerVersementsParMoto(moto.id!)).single;
       expect(v.statut, AppConstants.versementEnRetard);
       expect(v.detteId, isNull);
-      expect(await db.soldeNet(motoId: moto.id!), -50000);
+      expect((await db.compteMoto(motoId: moto.id!)).retard, 50000);
     });
 
     test('la reactivation garde les retards et dettes d\'avant la pause, et retire seulement les echeances de la pause', () async {
@@ -872,7 +912,7 @@ void main() {
       // Tombee pendant la pause : restee "en attente".
       await db.insererVersement(Versement(motoId: moto, dateEcheance: DateTime(2026, 9, 14), montantPrevu: 50000));
 
-      expect(await db.soldeNet(motoId: moto), -50000);
+      expect((await db.compteMoto(motoId: moto)).retard, 50000);
     });
   });
 

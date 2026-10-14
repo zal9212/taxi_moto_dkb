@@ -4,13 +4,14 @@ import '../core/constants.dart';
 import '../core/theme.dart';
 import '../models/moto.dart';
 import '../models/versement.dart';
+import '../services/schedule_service.dart';
 import '../utils/formatters.dart';
 
 class MotoCard extends StatelessWidget {
   final Moto moto;
   final double totalVerse;
-  /// Solde net : negatif = retard (dette), positif = avance (credit).
-  final double solde;
+  /// Retard et avance (voir [ScheduleService.compte]).
+  final CompteMoto compte;
   final Versement? prochainVersement;
   final String devise;
   final VoidCallback onTap;
@@ -19,7 +20,7 @@ class MotoCard extends StatelessWidget {
     super.key,
     required this.moto,
     required this.totalVerse,
-    required this.solde,
+    required this.compte,
     required this.prochainVersement,
     required this.devise,
     required this.onTap,
@@ -27,8 +28,8 @@ class MotoCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final estEnRetard = solde < 0;
-    final estEnAvance = solde > 0;
+    final estEnRetard = compte.retard > 0;
+    final estEnAvance = compte.avance > 0;
     final estInactive = moto.statut != AppConstants.motoActive;
 
     return InkWell(
@@ -70,17 +71,18 @@ class MotoCard extends StatelessWidget {
               formaterMontant(totalVerse, devise),
               style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
             ),
-            if (!estInactive && (estEnRetard || estEnAvance)) ...[
+            if (!estInactive && estEnRetard) ...[
               const SizedBox(height: 4),
               Text(
-                estEnRetard
-                    ? 'En retard de ${formaterMontant(-solde, devise)}'
-                    : 'En avance de ${formaterMontant(solde, devise)}',
-                style: TextStyle(
-                  color: estEnRetard ? AppColors.danger : AppColors.succes,
-                  fontSize: 10,
-                  fontWeight: FontWeight.w600,
-                ),
+                'En retard de ${formaterMontant(compte.retard, devise)}',
+                style: const TextStyle(color: AppColors.danger, fontSize: 10, fontWeight: FontWeight.w600),
+              ),
+            ],
+            if (!estInactive && estEnAvance) ...[
+              const SizedBox(height: 4),
+              Text(
+                'Paye d\'avance : ${formaterMontant(compte.avance, devise)}',
+                style: const TextStyle(color: AppColors.succes, fontSize: 10, fontWeight: FontWeight.w600),
               ),
             ],
             const SizedBox(height: 8),

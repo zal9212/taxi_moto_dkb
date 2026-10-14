@@ -6,6 +6,11 @@ import '../models/versement.dart';
 /// partir du jour [depuis], jusqu'au changement suivant.
 typedef ChangementMontant = ({DateTime depuis, double montant});
 
+/// Compte d'une moto : ce qui reste du sur les echeances passees ([retard])
+/// et ce qui est deja paye d'avance ([avance]). Deux chiffres, jamais
+/// compenses : une avance sur le futur ne cache pas un retard passe.
+typedef CompteMoto = ({double retard, double avance});
+
 /// Calcule les dates d'échéance des versements d'une moto à partir de sa
 /// configuration (fréquence hebdomadaire / mensuelle / personnalisée).
 /// Les versements sont récurrents et indéfinis (pas de montant total à
@@ -103,20 +108,38 @@ class ScheduleService {
     required int valeur,
     required DateTime aujourdHui,
   }) {
-    final occupees = existants.map((v) => dateSeule(v.dateEcheance)).toSet().toList()..sort();
     var aVenir = existants.where((v) => _estAVenir(v, aujourdHui)).length;
+    final dates = <DateTime>[];
+    for (final d in _suiteDates(existants: existants, premiere: premiere, type: type, valeur: valeur)) {
+      if (aVenir >= fenetreEcheances) break;
+      dates.add(d);
+      if (!d.isBefore(aujourdHui)) aVenir++;
+    }
+    return dates;
+  }
+
+  /// Suite sans fin des dates du rythme a partir de [premiere], sans jamais
+  /// deux echeances dans la meme periode (voir [datesAGenerer]) : seule
+  /// source des dates d'echeances a creer.
+  static Iterable<DateTime> _suiteDates({
+    required List<Versement> existants,
+    required DateTime premiere,
+    required String type,
+    required int valeur,
+  }) sync* {
+    final occupees = existants.map((v) => dateSeule(v.dateEcheance)).toSet().toList()..sort();
     final finDerniere = occupees.isEmpty
         ? null
         : occupees.length >= 2
             ? _finCouverture(occupees[occupees.length - 2], occupees.last)
             : echeanceSuivante(dateActuelle: occupees.last, type: type, valeur: valeur);
 
-    final dates = <DateTime>[];
+    DateTime? precedente;
     bool chevauche(DateTime d) {
       // Une nouvelle echeance ne tombe pas non plus dans la periode de la
       // precedente (ex : debut un jeudi, versement le lundi -> pas le lundi
       // 4 jours apres, mais celui d'apres).
-      if (dates.isNotEmpty && d.isBefore(finPeriode(dates.last, type: type, valeur: valeur))) return true;
+      if (precedente != null && d.isBefore(finPeriode(precedente, type: type, valeur: valeur))) return true;
       final finD = finPeriode(d, type: type, valeur: valeur);
       for (var i = 0; i < occupees.length; i++) {
         final fin = i + 1 < occupees.length ? occupees[i + 1] : finDerniere!;
@@ -125,14 +148,11 @@ class ScheduleService {
       return false;
     }
 
-    for (var d = dateSeule(premiere);
-        aVenir < fenetreEcheances;
-        d = echeanceSuivante(dateActuelle: d, type: type, valeur: valeur)) {
+    for (var d = dateSeule(premiere);; d = echeanceSuivante(dateActuelle: d, type: type, valeur: valeur)) {
       if (chevauche(d)) continue;
-      dates.add(d);
-      if (!d.isBefore(aujourdHui)) aVenir++;
+      precedente = d;
+      yield d;
     }
-    return dates;
   }
 
   /// Fin (exclue) de la période couverte par une échéance du jour [d] : une
@@ -209,17 +229,26 @@ class ScheduleService {
       v.statut != AppConstants.versementEnDette &&
       (moto.statut == AppConstants.motoActive || v.statut != AppConstants.versementEnAttente);
 
-  /// Solde de la moto : tout ce qui a ete verse sur ses echeances moins ce
-  /// qui est du a ce jour. Negatif = retard, positif = avance (un trop-paye
-  /// se reporte sur la suite). L'argent recu compte toujours, meme moto
-  /// suspendue.
-  static double solde(Moto moto, List<Versement> versements, DateTime aujourdHui) {
-    var total = 0.0;
+  /// Compte de la moto (voir [CompteMoto]) :
+  /// - retard : ce qui reste du sur les echeances dues = exactement ce que
+  ///   liste la relance ;
+  /// - avance : ce qui est deja paye sur les echeances pas encore dues, plus
+  ///   un eventuel trop-paye sur une echeance due.
+  /// L'argent recu compte toujours, meme moto suspendue.
+  static CompteMoto compte(Moto moto, List<Versement> versements, DateTime aujourdHui) {
+    var retard = 0.0;
+    var avance = 0.0;
     for (final v in versements) {
-      if (v.statut == AppConstants.versementPaye) total += montantPaye(v);
-      if (estDue(v, moto, aujourdHui)) total -= v.montantPrevu;
+      if (v.statut == AppConstants.versementEnDette) continue;
+      final paye = montantPaye(v);
+      if (estDue(v, moto, aujourdHui)) {
+        retard += resteDu(v);
+        if (paye > v.montantPrevu) avance += paye - v.montantPrevu;
+      } else if (v.statut == AppConstants.versementPaye) {
+        avance += paye;
+      }
     }
-    return total;
+    return (retard: retard, avance: avance);
   }
 
   /// Ce qui reste dû sur une échéance (0 si payée en entier ou passée en
@@ -251,27 +280,75 @@ class ScheduleService {
     ]..sort((a, b) => a.date.compareTo(b.date));
   }
 
-  /// Répartit un montant reçu sur les périodes dues, la plus ancienne
-  /// d'abord (méthode des logiciels d'encaissement de loyers) : chaque
-  /// période est soldée avant de passer à la suivante. Un trop-payé au-delà
-  /// de toutes les périodes reste sur la dernière (avance du chauffeur).
-  static List<({DateTime date, double montant})> repartirPaiement(
-    List<({DateTime date, String etat, double reste})> periodes,
-    double montant,
-  ) {
+  /// Periodes proposees pour un versement : celles a payer (dues et a
+  /// venir), puis les [futures] suivantes du rythme, pas encore creees (au
+  /// montant en vigueur a leur date) pour payer d'avance.
+  static List<({DateTime date, String etat, double reste})> periodesChoisissables({
+    required Moto moto,
+    required List<Versement> existants,
+    required List<ChangementMontant> changements,
+    required DateTime aujourdHui,
+    int futures = 8,
+  }) =>
+      [
+        ...periodesAPayer(existants: existants, moto: moto, aujourdHui: aujourdHui),
+        ..._periodesSuivantes(moto, existants, changements).take(futures),
+      ];
+
+  /// Periodes du rythme apres la derniere echeance existante.
+  static Iterable<({DateTime date, String etat, double reste})> _periodesSuivantes(
+      Moto moto, List<Versement> existants, List<ChangementMontant> changements) {
+    final dates = existants.map((v) => dateSeule(v.dateEcheance)).toList()..sort();
+    final premiere = dates.isEmpty
+        ? moto.dateDebut
+        : echeanceSuivante(dateActuelle: dates.last, type: moto.frequenceType, valeur: moto.frequenceValeur);
+    return _suiteDates(existants: existants, premiere: premiere, type: moto.frequenceType, valeur: moto.frequenceValeur)
+        .map((d) => (date: d, etat: 'a venir', reste: montantAu(moto, changements, d)));
+  }
+
+  /// Ce que paie un versement de [montant] : les periodes [choisies] (null :
+  /// toutes les periodes a payer), la plus ancienne d'abord ; un surplus
+  /// paie les periodes qui suivent la derniere choisie, au rythme de la moto
+  /// (avance). Jamais plus que son montant sur une echeance : la fiche et la
+  /// relance restent d'accord quand ces periodes arrivent. Seul calcul d'un
+  /// versement : l'apercu a l'ecran et l'enregistrement passent par ici.
+  static List<({DateTime date, double montant})> affecterVersement({
+    required Moto moto,
+    required List<Versement> existants,
+    required List<ChangementMontant> changements,
+    required DateTime aujourdHui,
+    required double montant,
+    Set<DateTime>? choisies,
+  }) {
+    final univers = periodesAPayer(existants: existants, moto: moto, aujourdHui: aujourdHui)
+        .followedBy(_periodesSuivantes(moto, existants, changements));
+    final selection = (choisies == null || choisies.isEmpty) ? null : choisies.map(dateSeule).toSet();
+    final derniere = selection?.reduce((a, b) => a.isAfter(b) ? a : b);
+
     final affectations = <({DateTime date, double montant})>[];
     var restant = montant;
-    for (final p in periodes) {
-      if (restant <= 0) break;
+    void payer(({DateTime date, String etat, double reste}) p) {
+      if (restant <= 0 || p.reste <= 0) return;
       final part = restant < p.reste ? restant : p.reste;
       affectations.add((date: p.date, montant: part));
       restant -= part;
     }
-    if (restant > 0 && affectations.isNotEmpty) {
-      final derniere = affectations.removeLast();
-      affectations.add((date: derniere.date, montant: derniere.montant + restant));
+
+    // ponytail: 1000 periodes max, garde-fou si un montant prevu vaut 0.
+    if (selection != null) {
+      for (final p in univers.takeWhile((p) => !p.date.isAfter(derniere!))) {
+        if (selection.contains(p.date)) payer(p);
+      }
     }
-    return affectations;
+    for (final p in univers.where((p) => derniere == null || p.date.isAfter(derniere)).take(1000)) {
+      if (restant <= 0) break;
+      payer(p);
+    }
+    if (restant > 0 && affectations.isNotEmpty) {
+      final d = affectations.removeLast();
+      affectations.add((date: d.date, montant: d.montant + restant)); // jamais d'argent perdu
+    }
+    return affectations..sort((a, b) => a.date.compareTo(b.date));
   }
 
   /// Nouveau plan des échéances après une modification de la moto. Seules

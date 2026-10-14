@@ -215,6 +215,19 @@ void main() {
       expect(find.textContaining('Rien a relancer'), findsOneWidget);
     });
   });
+  testWidgets('07c ajouter versement : periodes cochees, montant, enregistre comme un versement', (t) async {
+    final d = await io(t, donnees);
+    final avant = await io(t, () => db.totalEncaisse(motoId: d.moto.id!));
+    await afficher(t, '07c_ajouter_versement', MotoDetailScreen(motoId: d.moto.id!), ensuite: () async {
+      await t.tap(find.text('Ajouter versement'));
+      await charger(t);
+      expect(find.text('Periodes payees'), findsOneWidget);
+      expect(find.byType(CheckboxListTile), findsWidgets);
+      await t.tap(find.text('Enregistrer'));
+      await charger(t);
+    });
+    expect(await io(t, () => db.totalEncaisse(motoId: d.moto.id!)), greaterThan(avant));
+  });
   testWidgets('08 nouvelle moto', (t) async => afficher(t, '08_nouvelle_moto', const AddEditMotoScreen()));
   testWidgets('09 modifier moto', (t) async {
     final d = await io(t, donnees);

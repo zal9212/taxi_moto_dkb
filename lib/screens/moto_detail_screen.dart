@@ -33,7 +33,7 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
   /// Part de la caisse venant des remboursements de dettes liees a la moto.
   double _remboursementsDettes = 0;
   /// Solde net : negatif = retard (dette), positif = avance (credit).
-  double _solde = 0;
+  CompteMoto _compte = (retard: 0.0, avance: 0.0);
   String _devise = AppConstants.devisePardDefaut;
   List<Dette> _dettes = [];
   final Map<int, double> _soldeParDette = {};
@@ -66,7 +66,7 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     final changementsMontant = await _db.listerChangementsMontant(widget.motoId);
     final totalVerse = await _db.totalEncaisse(motoId: widget.motoId);
     final remboursementsDettes = await _db.totalRemboursementsMotos(motoId: widget.motoId);
-    final solde = await _db.soldeNet(motoId: widget.motoId);
+    final compte = await _db.compteMoto(motoId: widget.motoId);
     final params = await _db.obtenirParametres();
     final dettes = await _db.listerDettesParLien(AppConstants.detteLienMoto, widget.motoId);
     _soldeParDette.clear();
@@ -81,7 +81,7 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
       _changementsMontant = changementsMontant;
       _totalVerse = totalVerse;
       _remboursementsDettes = remboursementsDettes;
-      _solde = solde;
+      _compte = compte;
       _devise = params.deviseSymbole;
       _dettes = dettes;
       _chargement = false;
@@ -167,59 +167,95 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
   List<({DateTime date, String etat, double reste})> _periodesDues() =>
       _periodesAPayer().where((p) => p.date.isBefore(ScheduleService.aujourdHui())).toList();
 
-  /// "Encaisser un versement" : le chauffeur donne de l'argent, on tape le
-  /// montant recu. Il est reparti tout seul sur les periodes dues, la plus
-  /// ancienne d'abord (apercu en direct), puis on peut envoyer le recu.
+  /// "Ajouter un versement" : on coche les periodes payees (les dues sont
+  /// cochees d'avance ; les suivantes du rythme permettent de payer
+  /// d'avance), le montant se remplit avec leur total et reste modifiable.
+  /// L'apercu vient du meme calcul que l'enregistrement
+  /// ([ScheduleService.affecterVersement]) : ce qu'on voit est ce qui est
+  /// enregistre. Puis on peut envoyer le recu.
   Future<void> _encaisserVersement() async {
     final moto = _moto;
     if (moto == null) return;
-    final periodes = _periodesAPayer();
+    final aujourdHui = ScheduleService.aujourdHui();
+    final periodes = ScheduleService.periodesChoisissables(
+        moto: moto, existants: _versements, changements: _changementsMontant, aujourdHui: aujourdHui);
     if (periodes.isEmpty) {
       ScaffoldMessenger.of(context)
           .showSnackBar(const SnackBar(content: Text('Aucune periode a payer pour le moment.')));
       return;
     }
-    final montantCtrl = TextEditingController(text: periodes.first.reste.toStringAsFixed(0));
+    final dues = periodes.where((p) => p.date.isBefore(aujourdHui)).map((p) => p.date).toSet();
+    final choisies = dues.isNotEmpty ? dues : {periodes.first.date};
+    double totalChoisi() => periodes.where((p) => choisies.contains(p.date)).fold(0, (t, p) => t + p.reste);
+    final montantCtrl = TextEditingController(text: totalChoisi().toStringAsFixed(0));
+    var montantModifie = false;
 
     final confirme = await showDialog<bool>(
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setStateDialog) {
           final saisi = lireMontant(montantCtrl.text);
-          final apercu = saisi == null ? null : ScheduleService.repartirPaiement(periodes, saisi);
+          final apercu = saisi == null || saisi <= 0
+              ? null
+              : ScheduleService.affecterVersement(
+                  moto: moto,
+                  existants: _versements,
+                  changements: _changementsMontant,
+                  aujourdHui: aujourdHui,
+                  montant: saisi,
+                  choisies: choisies,
+                );
           return AlertDialog(
-            title: const Text('Encaisser un versement'),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                TextField(
-                  controller: montantCtrl,
-                  autofocus: true,
-                  keyboardType: TextInputType.number,
-                  decoration: InputDecoration(labelText: 'Montant recu ($_devise)'),
-                  onChanged: (_) => setStateDialog(() {}),
-                ),
-                const SizedBox(height: 12),
-                const Text('Reparti sur (le plus ancien d\'abord) :',
-                    style: TextStyle(color: AppColors.texteGris, fontSize: 11)),
-                const SizedBox(height: 4),
-                if (apercu == null)
-                  const Text('Montant invalide', style: TextStyle(color: AppColors.danger, fontSize: 12))
-                else
-                  for (final a in apercu)
-                    Text(
-                      '${formaterDate(a.date)} : ${formaterMontant(a.montant, _devise)}'
-                      '${_libelleApresPaiement(periodes, a)}',
-                      style: const TextStyle(fontSize: 12),
+            title: const Text('Ajouter un versement'),
+            content: SizedBox(
+              width: double.maxFinite,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('Periodes payees', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+                    for (final p in periodes)
+                      CheckboxListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        controlAffinity: ListTileControlAffinity.leading,
+                        value: choisies.contains(p.date),
+                        title: Text('${formaterDate(p.date)} : ${formaterMontant(p.reste, _devise)}'),
+                        subtitle: Text('${p.etat[0].toUpperCase()}${p.etat.substring(1)}'),
+                        onChanged: (coche) => setStateDialog(() {
+                          coche == true ? choisies.add(p.date) : choisies.remove(p.date);
+                          if (!montantModifie) montantCtrl.text = totalChoisi().toStringAsFixed(0);
+                        }),
+                      ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: montantCtrl,
+                      keyboardType: TextInputType.number,
+                      decoration: InputDecoration(labelText: 'Montant recu ($_devise)'),
+                      onChanged: (_) => setStateDialog(() => montantModifie = true),
                     ),
-              ],
+                    const SizedBox(height: 12),
+                    const Text('Applique sur :', style: TextStyle(color: AppColors.texteGris, fontSize: 11)),
+                    const SizedBox(height: 4),
+                    if (apercu == null)
+                      const Text('Montant invalide', style: TextStyle(color: AppColors.danger, fontSize: 12))
+                    else
+                      for (final a in apercu)
+                        Text(
+                          '${formaterDate(a.date)} : ${formaterMontant(a.montant, _devise)}'
+                          '${_libelleApresPaiement(periodes, a)}',
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                  ],
+                ),
+              ),
             ),
             actions: [
               TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Annuler')),
               ElevatedButton(
-                onPressed: apercu == null ? null : () => Navigator.pop(context, true),
-                child: const Text('Encaisser'),
+                onPressed: apercu == null || apercu.isEmpty ? null : () => Navigator.pop(context, true),
+                child: const Text('Enregistrer'),
               ),
             ],
           );
@@ -229,11 +265,11 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
 
     if (confirme != true) return;
     final montant = lireMontant(montantCtrl.text);
-    if (montant == null) {
+    if (montant == null || montant <= 0) {
       _signalerMontantInvalide();
       return;
     }
-    final affectations = await _db.encaisser(moto, montant);
+    final affectations = await _db.encaisser(moto, montant, choisies: choisies);
     // Les rappels des periodes soldees n'ont plus lieu d'etre.
     for (final v in _versements) {
       if (v.id != null && affectations.any((a) => a.date == ScheduleService.dateSeule(v.dateEcheance))) {
@@ -260,12 +296,12 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     ));
   }
 
-  /// " (solde)" ou " (partiel, reste X)" pour l'apercu de repartition.
+  /// " (solde)", " (partiel, reste X)" ou " (avance)" pour l'apercu.
   String _libelleApresPaiement(
       List<({DateTime date, String etat, double reste})> periodes, ({DateTime date, double montant}) a) {
-    final p = periodes.firstWhere((p) => p.date == a.date);
-    if (a.montant > p.reste) return ' (solde + avance)';
-    if (a.montant == p.reste) return ' (solde)';
+    final p = periodes.where((p) => p.date == a.date).firstOrNull;
+    if (p == null) return ' (avance)';
+    if (a.montant >= p.reste) return ' (solde)';
     return ' (partiel, reste ${formaterMontant(p.reste - a.montant, _devise)})';
   }
 
@@ -302,7 +338,7 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
       // Memes chiffres que la fiche, pas un second calcul.
       totalEncaisse: _totalVerse,
       remboursementsDettes: _remboursementsDettes,
-      solde: _solde,
+      compte: _compte,
       dettes: _dettes,
       detteDe: _detteDe,
     );
@@ -549,10 +585,19 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
           ),
         ],
       ),
+      // Un seul geste quand le chauffeur donne de l'argent.
+      floatingActionButton: moto.statut == AppConstants.motoActive
+          ? FloatingActionButton.extended(
+              onPressed: _encaisserVersement,
+              icon: const Icon(Icons.add),
+              label: const Text('Ajouter versement'),
+            )
+          : null,
       body: RefreshIndicator(
         onRefresh: _charger,
         child: ListView(
-          padding: const EdgeInsets.all(16),
+          // En bas : place pour le bouton "Ajouter versement".
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 88),
           children: [
             Container(
               padding: const EdgeInsets.all(16),
@@ -572,31 +617,35 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
                     ScheduleService.libelleFrequence(moto.frequenceType, moto.frequenceValeur),
                     style: TextStyle(color: AppColors.texteGris, fontSize: 11),
                   ),
-                  if (moto.statut == AppConstants.motoActive && _solde != 0) ...[
-                    const SizedBox(height: 10),
-                    Row(
-                      children: [
-                        Icon(
-                          _solde < 0 ? Icons.error_outline : Icons.trending_up,
-                          color: _solde < 0 ? const Color(0xFFE2554A) : AppColors.accentLime,
-                          size: 14,
-                        ),
-                        const SizedBox(width: 6),
-                        Text(
-                          _solde < 0
-                              ? 'En retard de : ${formaterMontant(-_solde, _devise)}'
-                              : 'En avance de : ${formaterMontant(_solde, _devise)}',
-                          style: TextStyle(
-                            color: _solde < 0 ? const Color(0xFFE2554A) : AppColors.accentLime,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                          ),
+                  // Retard et avance separes : une avance ne cache pas un retard.
+                  if (moto.statut == AppConstants.motoActive) ...[
+                    for (final (montant, enRetard) in [(_compte.retard, true), (_compte.avance, false)])
+                      if (montant > 0) ...[
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [
+                            Icon(
+                              enRetard ? Icons.error_outline : Icons.trending_up,
+                              color: enRetard ? const Color(0xFFE2554A) : AppColors.accentLime,
+                              size: 14,
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              enRetard
+                                  ? 'En retard de : ${formaterMontant(montant, _devise)}'
+                                  : 'Paye d\'avance : ${formaterMontant(montant, _devise)}',
+                              style: TextStyle(
+                                color: enRetard ? const Color(0xFFE2554A) : AppColors.accentLime,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
                         ),
                       ],
-                    ),
                   ],
-                  const SizedBox(height: 14),
-                  if (moto.statut != AppConstants.motoActive)
+                  if (moto.statut != AppConstants.motoActive) ...[
+                    const SizedBox(height: 14),
                     Container(
                       padding: const EdgeInsets.symmetric(vertical: 10),
                       decoration: BoxDecoration(
@@ -607,17 +656,8 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
                           style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 12),
                         ),
                       ),
-                    )
-                  else
-                    // Un seul geste quand le chauffeur donne de l'argent : choisir la periode payee.
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        onPressed: _encaisserVersement,
-                        icon: const Icon(Icons.payments_outlined, size: 16),
-                        label: const Text('Encaisser un versement'),
-                      ),
                     ),
+                  ],
                 ],
               ),
             ),

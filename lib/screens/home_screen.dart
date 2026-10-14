@@ -7,6 +7,7 @@ import '../models/versement.dart';
 import '../models/parametre.dart';
 import '../services/database_service.dart';
 import '../services/notification_service.dart';
+import '../services/schedule_service.dart';
 import '../utils/formatters.dart';
 import '../widgets/moto_card.dart';
 import '../widgets/activity_tile.dart';
@@ -101,7 +102,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
     // Retard compte moto par moto : l'avance de l'une ne compense pas le
     // retard d'une autre, et les motos suspendues n'entrent pas en compte.
-    final soldes = await _db.soldesMotosActives(motoId: _motoFiltreId);
+    final comptes = await _db.comptesMotosActives(motoId: _motoFiltreId);
 
     final paiementsRecents = await _db.listerPaiementsRecents(
       motoId: _motoFiltreId,
@@ -167,8 +168,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _parametres = params;
       _motos = motos;
       _totalEncaisse = totalEncaisse;
-      _totalEnRetard = soldes.values.where((s) => s < 0).fold(0.0, (total, s) => total - s);
-      _motosAJour = soldes.values.where((s) => s >= 0).length;
+      _totalEnRetard = comptes.values.fold(0.0, (total, c) => total + c.retard);
+      _motosAJour = comptes.values.where((c) => c.retard == 0).length;
       _activites = activites.take(10).toList();
       _infosMotos = infosMotos;
     });
@@ -448,7 +449,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         child: MotoCard(
                           moto: item.moto,
                           totalVerse: item.totalVerse,
-                          solde: item.solde,
+                          compte: item.compte,
                           prochainVersement: item.prochain,
                           devise: devise,
                           onTap: () async {
@@ -483,7 +484,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         break;
       case _TriMoto.retard:
         // Solde le plus negatif (plus grosse dette) en premier.
-        items.sort((a, b) => a.solde.compareTo(b.solde));
+        // Les plus en retard d'abord.
+        items.sort((a, b) => (a.compte.avance - a.compte.retard).compareTo(b.compte.avance - b.compte.retard));
         break;
       case _TriMoto.recentes:
         break; // ordre deja fourni par listerMotos (date_creation DESC)
@@ -543,9 +545,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     for (final moto in motos) {
       if (moto.id == null) continue;
       final totalVerse = await _db.totalEncaisse(motoId: moto.id!);
-      final solde = await _db.soldeNet(motoId: moto.id!);
+      final compte = await _db.compteMoto(motoId: moto.id!);
       final prochain = await _db.prochainVersement(moto.id!);
-      resultats.add(_MotoAvecInfos(moto: moto, totalVerse: totalVerse, solde: solde, prochain: prochain));
+      resultats.add(_MotoAvecInfos(moto: moto, totalVerse: totalVerse, compte: compte, prochain: prochain));
     }
     return resultats;
   }
@@ -574,13 +576,13 @@ class _ActiviteRecente {
 class _MotoAvecInfos {
   final Moto moto;
   final double totalVerse;
-  final double solde;
+  final CompteMoto compte;
   final Versement? prochain;
 
   _MotoAvecInfos({
     required this.moto,
     required this.totalVerse,
-    required this.solde,
+    required this.compte,
     required this.prochain,
   });
 }

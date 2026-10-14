@@ -754,7 +754,7 @@ class DatabaseService {
 
   /// Caisse : versements payés + remboursements des dettes liées aux motos
   /// (voir [listerRemboursementsMotos]), avec filtres optionnels. Le retard
-  /// du chauffeur ([soldeNet]) ne compte, lui, que les versements.
+  /// du chauffeur ([compteMoto]) ne compte, lui, que les versements.
   Future<double> totalEncaisse({int? motoId, DateTime? debut, DateTime? fin}) async =>
       await _totalVersementsPayes(motoId: motoId, debut: debut, fin: fin) +
       await totalRemboursementsMotos(motoId: motoId, debut: debut, fin: fin);
@@ -769,22 +769,22 @@ class DatabaseService {
     return (result.first['total'] as num).toDouble();
   }
 
-  /// Solde d'une moto (voir [ScheduleService.solde], seule definition) :
-  /// negatif = retard, positif = avance.
-  Future<double> soldeNet({required int motoId}) async {
+  /// Retard et avance d'une moto (voir [ScheduleService.compte], seule
+  /// definition).
+  Future<CompteMoto> compteMoto({required int motoId}) async {
     final moto = await obtenirMoto(motoId);
-    if (moto == null) return 0;
-    return ScheduleService.solde(moto, await listerVersementsParMoto(motoId), ScheduleService.aujourdHui());
+    if (moto == null) return (retard: 0.0, avance: 0.0);
+    return ScheduleService.compte(moto, await listerVersementsParMoto(motoId), ScheduleService.aujourdHui());
   }
 
-  /// Solde de chaque moto active : le retard global de l'accueil additionne
-  /// les soldes negatifs moto par moto — l'avance d'une moto ne compense pas
-  /// le retard d'une autre, et une moto suspendue ne gonfle pas le total.
-  Future<Map<int, double>> soldesMotosActives({int? motoId}) async {
+  /// Compte de chaque moto active : le retard global de l'accueil additionne
+  /// les retards moto par moto — l'avance d'une moto ne compense pas le
+  /// retard d'une autre, et une moto suspendue ne gonfle pas le total.
+  Future<Map<int, CompteMoto>> comptesMotosActives({int? motoId}) async {
     final motos = await listerMotos(statut: AppConstants.motoActive);
     return {
       for (final m in motos)
-        if (motoId == null || m.id == motoId) m.id!: await soldeNet(motoId: m.id!),
+        if (motoId == null || m.id == motoId) m.id!: await compteMoto(motoId: m.id!),
     };
   }
 
@@ -1037,21 +1037,40 @@ class DatabaseService {
     await _remplacerEcheances(existants.where(deLaPause).toList(), await _nouvellesEcheances(moto, dates));
   }
 
-  /// "Encaisser un versement" : le montant recu est reparti sur les periodes
-  /// a payer, la plus ancienne d'abord (voir [ScheduleService.repartirPaiement]),
-  /// en completant leurs echeances. Chaque part est ecrite dans le journal
-  /// des paiements, datee d'aujourd'hui. Retourne la repartition (pour le recu).
-  Future<List<({DateTime date, double montant})>> encaisser(Moto moto, double montant) => _enFile(() async {
+  /// "Encaisser un versement" (bouton "Ajouter versement") : le montant
+  /// recu paie les periodes [choisies] (null : les plus anciennes d'abord),
+  /// le surplus les periodes suivantes du rythme — voir
+  /// [ScheduleService.affecterVersement], seul calcul. Une echeance existante
+  /// est completee ; une periode future pas encore creee l'est, a sa date et
+  /// au montant en vigueur. Chaque part est ecrite dans le journal des
+  /// paiements, datee d'aujourd'hui, comme tout versement. Retourne la
+  /// repartition (pour le recu).
+  Future<List<({DateTime date, double montant})>> encaisser(Moto moto, double montant, {Set<DateTime>? choisies}) =>
+      _enFile(() async {
         final existants = await listerVersementsParMoto(moto.id!);
-        final affectations = ScheduleService.repartirPaiement(
-          ScheduleService.periodesAPayer(existants: existants, moto: moto, aujourdHui: ScheduleService.aujourdHui()),
-          montant,
+        final changements = await listerChangementsMontant(moto.id!);
+        final aujourdHui = ScheduleService.aujourdHui();
+        final affectations = ScheduleService.affecterVersement(
+          moto: moto,
+          existants: existants,
+          changements: changements,
+          aujourdHui: aujourdHui,
+          montant: montant,
+          choisies: choisies,
         );
         final maintenant = DateTime.now();
         for (final a in affectations) {
-          final echeance = existants.firstWhere((v) =>
-              ScheduleService.dateSeule(v.dateEcheance) == a.date && v.statut != AppConstants.versementEnDette);
-          await ajouterPaiement(echeance.id!, a.montant, date: maintenant);
+          final existante = existants
+              .where((v) => ScheduleService.dateSeule(v.dateEcheance) == a.date && v.statut != AppConstants.versementEnDette)
+              .firstOrNull;
+          final id = existante?.id ??
+              await insererVersement(Versement(
+                motoId: moto.id!,
+                dateEcheance: a.date,
+                montantPrevu: ScheduleService.montantAu(moto, changements, a.date),
+                statut: a.date.isBefore(aujourdHui) ? AppConstants.versementEnRetard : AppConstants.versementEnAttente,
+              ));
+          await ajouterPaiement(id, a.montant, date: maintenant);
         }
         return affectations;
       });

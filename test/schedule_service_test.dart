@@ -225,31 +225,6 @@ void main() {
       expect(ScheduleService.montantAu(m, const [], DateTime(2027)), 50000);
     });
 
-    test('repartition : la plus ancienne periode est payee d\'abord, le reste passe a la suivante', () {
-      final periodes = [
-        (date: DateTime(2026, 9, 14), etat: 'en retard', reste: 50000.0),
-        (date: DateTime(2026, 9, 21), etat: 'en retard', reste: 50000.0),
-        (date: DateTime(2026, 10, 5), etat: 'a venir', reste: 50000.0),
-      ];
-
-      expect(ScheduleService.repartirPaiement(periodes, 80000).map((a) => (a.date, a.montant)), [
-        (DateTime(2026, 9, 14), 50000),
-        (DateTime(2026, 9, 21), 30000),
-      ]);
-    });
-
-    test('repartition : un trop-paye au-dela de toutes les periodes reste sur la derniere (avance)', () {
-      final periodes = [
-        (date: DateTime(2026, 9, 14), etat: 'en retard', reste: 50000.0),
-        (date: DateTime(2026, 10, 5), etat: 'a venir', reste: 50000.0),
-      ];
-
-      expect(ScheduleService.repartirPaiement(periodes, 120000).map((a) => (a.date, a.montant)), [
-        (DateTime(2026, 9, 14), 50000),
-        (DateTime(2026, 10, 5), 70000),
-      ]);
-    });
-
     test('moto suspendue puis reactivee : les semaines de pause ne sont pas dues', () {
       // Lundis payes jusqu'au 07/09, pause du 08/09 au 27/09, reprise le lundi 28/09.
       final periodes = ScheduleService.periodesAPayer(
@@ -277,7 +252,7 @@ void main() {
           ScheduleService.periodesAPayer(existants: existants, moto: suspendue, aujourdHui: aujourdHui)
               .map((p) => p.date),
           [DateTime(2026, 9, 14)]);
-      expect(ScheduleService.solde(suspendue, existants, aujourdHui), -50000);
+      expect(ScheduleService.compte(suspendue, existants, aujourdHui), (retard: 50000.0, avance: 0.0));
     });
 
     test('jour change (lundi -> mercredi) : les semaines payees le lundi ne sont pas redemandees le mercredi', () {
@@ -296,7 +271,7 @@ void main() {
 
       expect(dues.map((p) => p.date), [DateTime(2026, 9, 14), DateTime(2026, 9, 16), DateTime(2026, 9, 30)]);
       // La relance (somme des periodes dues) et la fiche (solde) disent la meme chose.
-      expect(ScheduleService.solde(m, existants, aujourdHui), -dues.fold<double>(0, (t, p) => t + p.reste));
+      expect(ScheduleService.compte(m, existants, aujourdHui).retard, dues.fold<double>(0, (t, p) => t + p.reste));
     });
 
     test('solde : payee sans montant = payee en entier, dette exclue, partiel compte ce qui manque', () {
@@ -308,11 +283,81 @@ void main() {
         echeance(DateTime(2026, 9, 28), enRetard),
       ];
 
-      expect(ScheduleService.solde(m, existants, aujourdHui), -70000);
+      expect(ScheduleService.compte(m, existants, aujourdHui), (retard: 70000.0, avance: 0.0));
       expect(
           ScheduleService.periodesAPayer(existants: existants, moto: m, aujourdHui: aujourdHui)
               .fold<double>(0, (t, p) => t + p.reste),
           70000);
+    });
+  });
+
+  group('ajouter un versement (periodes choisies)', () {
+    /// Lundis : retards les 14 et 21/09, paye le 28/09, 4 echeances a venir (05 au 26/10).
+    final existants = [
+      echeance(DateTime(2026, 9, 14), enRetard),
+      echeance(DateTime(2026, 9, 21), enRetard),
+      echeance(DateTime(2026, 9, 28), paye),
+      echeance(DateTime(2026, 10, 5), enAttente),
+      echeance(DateTime(2026, 10, 12), enAttente),
+      echeance(DateTime(2026, 10, 19), enAttente),
+      echeance(DateTime(2026, 10, 26), enAttente),
+    ];
+    final m = moto(hebdo, DateTime.monday, dateDebut: DateTime(2026, 9, 14));
+    List<(DateTime, double)> affecter(double montant, {Set<DateTime>? choisies, List<ChangementMontant> changements = const []}) =>
+        ScheduleService.affecterVersement(
+          moto: m,
+          existants: existants,
+          changements: changements,
+          aujourdHui: aujourdHui,
+          montant: montant,
+          choisies: choisies,
+        ).map((a) => (a.date, a.montant)).toList();
+
+    test('les periodes proposees suivent la frequence : dues, a venir, puis les suivantes', () {
+      final periodes = ScheduleService.periodesChoisissables(
+          moto: m, existants: existants, changements: const [], aujourdHui: aujourdHui, futures: 2);
+
+      expect(periodes.map((p) => p.date), [
+        DateTime(2026, 9, 14),
+        DateTime(2026, 9, 21),
+        DateTime(2026, 10, 5),
+        DateTime(2026, 10, 12),
+        DateTime(2026, 10, 19),
+        DateTime(2026, 10, 26),
+        DateTime(2026, 11, 2),
+        DateTime(2026, 11, 9),
+      ]);
+    });
+
+    test('paie seulement les periodes choisies, meme une future pas encore creee', () {
+      expect(affecter(100000, choisies: {DateTime(2026, 9, 21), DateTime(2026, 11, 2)}),
+          [(DateTime(2026, 9, 21), 50000), (DateTime(2026, 11, 2), 50000)]);
+    });
+
+    test('un surplus passe aux periodes suivantes, jamais plus que son montant sur une echeance', () {
+      expect(affecter(120000, choisies: {DateTime(2026, 9, 14)}),
+          [(DateTime(2026, 9, 14), 50000), (DateTime(2026, 9, 21), 50000), (DateTime(2026, 10, 5), 20000)]);
+
+      final avance = affecter(400000);
+      expect(avance.map((a) => a.$1), [
+        DateTime(2026, 9, 14),
+        DateTime(2026, 9, 21),
+        DateTime(2026, 10, 5),
+        DateTime(2026, 10, 12),
+        DateTime(2026, 10, 19),
+        DateTime(2026, 10, 26),
+        DateTime(2026, 11, 2),
+        DateTime(2026, 11, 9),
+      ]);
+      expect(avance.every((a) => a.$2 <= 50000), isTrue);
+      expect(avance.fold<double>(0, (t, a) => t + a.$2), 400000);
+    });
+
+    test('une periode future prend le montant en vigueur a sa date', () {
+      expect(
+          affecter(60000,
+              choisies: {DateTime(2026, 11, 2)}, changements: [(depuis: DateTime(2026, 11, 1), montant: 60000.0)]),
+          [(DateTime(2026, 11, 2), 60000)]);
     });
   });
 

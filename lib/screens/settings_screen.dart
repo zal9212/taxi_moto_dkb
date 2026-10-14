@@ -9,6 +9,7 @@ import '../services/auth_service.dart';
 import '../services/excel_service.dart';
 import '../services/notification_service.dart';
 import '../services/pdf_service.dart';
+import '../services/schedule_service.dart';
 import 'categorie/categories_screen.dart';
 import 'dette/dettes_screen.dart';
 import 'lock_screen.dart';
@@ -212,18 +213,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final motos = await _db.listerMotos();
       // Memes chiffres que la fiche de chaque moto.
       final encaisseParMoto = <int, double>{};
-      final soldeParMoto = <int, double>{};
+      final compteParMoto = <int, CompteMoto>{};
       final depensesParMoto = <int, List<Depense>>{};
       for (final m in motos) {
         if (m.id == null) continue;
         encaisseParMoto[m.id!] = await _db.totalEncaisse(motoId: m.id!);
-        soldeParMoto[m.id!] = await _db.soldeNet(motoId: m.id!);
+        compteParMoto[m.id!] = await _db.compteMoto(motoId: m.id!);
         depensesParMoto[m.id!] = await _db.listerDepensesParMoto(m.id!);
       }
       await PdfService.genererEtPartagerRapportGlobal(
         motos: motos,
         encaisseParMoto: encaisseParMoto,
-        soldeParMoto: soldeParMoto,
+        compteParMoto: compteParMoto,
         depensesParMoto: depensesParMoto,
         deviseSymbole: _parametres?.deviseSymbole ?? 'FG',
       );

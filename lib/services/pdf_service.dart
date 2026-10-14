@@ -14,7 +14,7 @@ import 'schedule_service.dart';
 class PdfService {
   PdfService._();
 
-  /// Releve d'une moto. Les chiffres (encaisse, solde, dettes) sont ceux
+  /// Releve d'une moto. Les chiffres (encaisse, retard, avance, dettes) sont ceux
   /// de la fiche moto, pas un second calcul : le PDF dit toujours la meme
   /// chose que l'app.
   static Future<void> genererEtPartagerReleve({
@@ -24,7 +24,7 @@ class PdfService {
     required String deviseSymbole,
     required double totalEncaisse,
     required double remboursementsDettes,
-    required double solde,
+    required CompteMoto compte,
     required List<Dette> dettes,
     required ({double rembourse, double reste})? Function(int? detteId) detteDe,
   }) async {
@@ -46,13 +46,10 @@ class PdfService {
           pw.Text('Total encaisse : ${totalEncaisse.toStringAsFixed(0)} $deviseSymbole'),
           if (remboursementsDettes > 0)
             pw.Text('  dont ${remboursementsDettes.toStringAsFixed(0)} $deviseSymbole de remboursements de dettes'),
-          pw.Text(
-            solde < 0
-                ? 'Solde : en retard de ${(-solde).toStringAsFixed(0)} $deviseSymbole'
-                : solde > 0
-                    ? 'Solde : en avance de ${solde.toStringAsFixed(0)} $deviseSymbole'
-                    : 'Solde : a jour',
-          ),
+          pw.Text(compte.retard > 0
+              ? 'En retard de : ${compte.retard.toStringAsFixed(0)} $deviseSymbole'
+              : 'Retard : aucun (a jour)'),
+          if (compte.avance > 0) pw.Text('Paye d\'avance : ${compte.avance.toStringAsFixed(0)} $deviseSymbole'),
           pw.Text('Total depenses (huile, reparations...) : ${totalDepenses.toStringAsFixed(0)} $deviseSymbole'),
           pw.SizedBox(height: 16),
 
@@ -129,7 +126,7 @@ class PdfService {
   static Future<void> genererEtPartagerRapportGlobal({
     required List<Moto> motos,
     required Map<int, double> encaisseParMoto,
-    required Map<int, double> soldeParMoto,
+    required Map<int, CompteMoto> compteParMoto,
     required Map<int, List<Depense>> depensesParMoto,
     required String deviseSymbole,
   }) async {
@@ -143,9 +140,8 @@ class PdfService {
     final lignes = motos.map((m) {
       final depenses = m.id != null ? (depensesParMoto[m.id] ?? []) : <Depense>[];
       final verse = encaisseParMoto[m.id] ?? 0;
-      final solde = soldeParMoto[m.id] ?? 0;
-      final retard = solde < 0 ? -solde : 0.0;
-      final avance = solde > 0 ? solde : 0.0;
+      final retard = compteParMoto[m.id]?.retard ?? 0.0;
+      final avance = compteParMoto[m.id]?.avance ?? 0.0;
       final dep = depenses.fold<double>(0, (s, d) => s + d.montant);
 
       totalGeneralVerse += verse;
