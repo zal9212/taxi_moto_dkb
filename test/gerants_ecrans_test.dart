@@ -132,18 +132,26 @@ Finder soldeDuCompte(String nom, double montant) => find.descendant(
 
 final micro = _FauxMicro();
 
+late Directory dossierBase;
+
 void main() {
   setUpAll(() async {
     sqfliteFfiInit();
     databaseFactory = databaseFactoryFfiNoIsolate;
     // Base a part : les fichiers de test tournent en parallele.
-    await databaseFactory.setDatabasesPath((await Directory.systemTemp.createTemp('gerants_ecrans')).path);
+    dossierBase = await Directory.systemTemp.createTemp('gerants_ecrans');
+    await databaseFactory.setDatabasesPath(dossierBase.path);
     await initializeDateFormatting('fr_FR');
     RecordPlatform.instance = micro;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
       const MethodChannel('plugins.flutter.io/path_provider'),
       (call) async => Directory.systemTemp.path,
     );
+  });
+
+  tearDownAll(() async {
+    await db.fermer();
+    await dossierBase.delete(recursive: true);
   });
 
   setUp(() async {
