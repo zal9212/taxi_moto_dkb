@@ -53,6 +53,9 @@ class DatabaseService {
   /// La connexion est rouverte automatiquement au prochain acces via
   /// [database].
   Future<void> fermer() async {
+    // File neuve : une operation en attente visait la base qu'on ferme (et
+    // en test, sa suite peut rester liee a une horloge simulee terminee).
+    _fileEcheances = Future.value();
     final db = _db;
     if (db != null) {
       _db = null;
@@ -1588,8 +1591,11 @@ class DatabaseService {
       throw Exception('"$nom" est reserve au compte du proprietaire.');
     }
     // Comparaison en Dart, comme l'import Excel (LOWER de SQLite ignore les accents).
+    // Pas de null en argument (sqflite le refusera) : nouveau gerant = sans id.
     final autres = await db.query('categorie_gerants',
-        columns: ['nom'], where: 'entite_id = ? AND id IS NOT ?', whereArgs: [g.entiteId, g.id]);
+        columns: ['nom'],
+        where: g.id == null ? 'entite_id = ?' : 'entite_id = ? AND id != ?',
+        whereArgs: [g.entiteId, if (g.id != null) g.id]);
     if (autres.any((a) => (a['nom'] as String).trim().toLowerCase() == nom.toLowerCase())) {
       throw Exception('Un gerant nomme "$nom" existe deja.');
     }
