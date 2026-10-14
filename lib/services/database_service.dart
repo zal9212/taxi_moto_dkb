@@ -1136,6 +1136,10 @@ class DatabaseService {
   ///    jamais supprimee.
   /// 2. jamais plus que son montant sur une echeance : le surplus est une
   ///    avance, deduite des echeances suivantes.
+  /// 3. l'avance reste regroupee dans l'ordre : apres un changement de
+  ///    montant, l'argent deja verse d'avance se redistribue selon le
+  ///    nouveau montant (la 1re echeance a venir complete, puis la suite),
+  ///    jamais une echeance incomplete suivie d'une echeance payee.
   /// L'argent deplace garde sa date de paiement : le total encaisse et les
   /// statistiques par date ne changent pas.
   Future<void> normaliser(int motoId) => _enFile(() => _normaliser(motoId));
@@ -1184,6 +1188,46 @@ class DatabaseService {
 
       for (final r in aReporter) {
         await _reporter(txn, moto, r.depuis, r.argent);
+      }
+
+      // 3. Avance regroupee : l'argent des echeances a venir qui suivent la
+      // premiere incomplete revient la remplir, puis les suivantes.
+      final aVenir = (await txn.query(
+        'versements',
+        where: 'moto_id = ? AND statut != ? AND date_echeance >= ?',
+        whereArgs: [motoId, AppConstants.versementEnDette, ScheduleService.aujourdHui().toIso8601String()],
+        orderBy: 'date_echeance ASC',
+      ))
+          .map(Versement.fromMap)
+          .toList();
+      final premiereIncomplete = aVenir.indexWhere((v) => ScheduleService.resteDu(v) > 0);
+      if (premiereIncomplete >= 0) {
+        final argent = <({DateTime date, double montant})>[];
+        for (final v in aVenir.skip(premiereIncomplete + 1)) {
+          final paye = ScheduleService.montantPaye(v);
+          if (paye <= 0) continue;
+          argent.addAll(await _retirerArgent(txn, v, paye));
+          await txn.update(
+            'versements',
+            {'statut': AppConstants.versementEnAttente, 'montant_paye': null, 'date_validation': null},
+            where: 'id = ?',
+            whereArgs: [v.id],
+          );
+        }
+        if (argent.isNotEmpty) await _reporter(txn, moto, aVenir[premiereIncomplete].dateEcheance, argent);
+      }
+
+      // Les echeances a venir creees pour une avance et redevenues vides
+      // (avance regroupee) : on n'en garde que la fenetre habituelle, le
+      // roulement recree les suivantes aux memes dates.
+      final vides = (await txn.query(
+        'versements',
+        where: 'moto_id = ? AND statut = ? AND montant_paye IS NULL AND date_echeance >= ?',
+        whereArgs: [motoId, AppConstants.versementEnAttente, ScheduleService.aujourdHui().toIso8601String()],
+        orderBy: 'date_echeance ASC',
+      ));
+      for (final l in vides.skip(ScheduleService.fenetreEcheances)) {
+        await txn.delete('versements', where: 'id = ?', whereArgs: [l['id']]);
       }
     });
   }

@@ -645,6 +645,17 @@ void main() {
         expect((v.montantPaye ?? 0) <= v.montantPrevu, isTrue,
             reason: '$etape : ${v.dateEcheance} payee ${v.montantPaye} pour ${v.montantPrevu}');
       }
+      // 6. L'avance est regroupee : pas d'echeance a venir incomplete suivie d'une echeance a venir payee.
+      final aVenir = (await db.listerVersementsParMoto(moto.id!))
+          .where((v) => v.statut != AppConstants.versementEnDette && !v.dateEcheance.isBefore(aujourdHui))
+          .toList()
+        ..sort((a, b) => a.dateEcheance.compareTo(b.dateEcheance));
+      for (var i = 1; i < aVenir.length; i++) {
+        if ((aVenir[i].montantPaye ?? 0) > 0) {
+          expect(ScheduleService.resteDu(aVenir[i - 1]), 0,
+              reason: '$etape : ${aVenir[i - 1].dateEcheance} incomplete avant ${aVenir[i].dateEcheance} payee');
+        }
+      }
       // 2. Rien de deja paye n'est perdu ni compte deux fois.
       expect(await db.totalEncaisse(motoId: moto.id!), encaisse, reason: etape);
       // 3. Fiche, accueil et relance disent la meme chose.
@@ -733,6 +744,12 @@ void main() {
     await encaisser('versement sur 2 periodes choisies (dont une pas encore creee)', futures.first.reste + futures.last.reste,
         choisies: {futures.first.date, futures.last.date});
     await encaisser('gros paiement (avance)', 2000000);
+    await db.changerMontant(moto.id!, 260000, aujourdHui);
+    await db.assurerEcheances(moto); // comme la fiche moto au rechargement
+    await verifier('avance en cours, montant en hausse');
+    await db.changerMontant(moto.id!, 120000, aujourdHui);
+    await db.assurerEcheances(moto);
+    await verifier('avance en cours, montant en baisse');
   });
 
   test('ajouter versement : periodes choisies, une future creee au rythme, journal et solde a jour', () async {
@@ -852,6 +869,32 @@ void main() {
       final v = await parDate(moto.id!);
       expect((v[DateTime(2026, 9, 14)]!.montantPaye, v[DateTime(2026, 9, 21)]!.montantPaye), (50000, 30000));
       expect(await db.totalEncaisse(motoId: moto.id!), 80000);
+    });
+
+    test('avance en cours et nouveau montant : l\'avance se redistribue selon le nouveau montant', () async {
+      final moto = (await db.obtenirMoto(await nouvelleMoto()))!;
+      await db.assurerEcheances(moto);
+      final aujourdHui = ScheduleService.aujourdHui();
+      final futures = (await db.listerVersementsParMoto(moto.id!))
+          .where((v) => !v.dateEcheance.isBefore(aujourdHui))
+          .map((v) => v.dateEcheance)
+          .toList()
+        ..sort();
+      // Deux semaines payees d'avance a 50 000.
+      await db.encaisser(moto, 100000, choisies: {futures[0], futures[1]});
+      Future<List<(double, double?)>> avance() async {
+        final v = {for (final x in await db.listerVersementsParMoto(moto.id!)) x.dateEcheance: x};
+        return [for (final d in futures.take(3)) (v[d]!.montantPrevu, v[d]!.montantPaye)];
+      }
+
+      await db.changerMontant(moto.id!, 60000, aujourdHui);
+      // Pas deux echeances partielles : la 1re est complete, le reste va sur la 2e.
+      expect(await avance(), [(60000, 60000), (60000, 40000), (60000, null)]);
+
+      await db.changerMontant(moto.id!, 40000, aujourdHui);
+      expect(await avance(), [(40000, 40000), (40000, 40000), (40000, 20000)]);
+      expect(await db.totalEncaisse(motoId: moto.id!), 100000);
+      expect((await db.compteMoto(motoId: moto.id!)).avance, 100000);
     });
 
     test('baisser le montant : ce qui a ete paye en trop devient de l\'avance sur la suite', () async {
