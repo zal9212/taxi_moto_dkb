@@ -15,6 +15,7 @@ import '../models/depense.dart';
 import '../models/dette.dart';
 import '../models/moto.dart';
 import '../models/versement.dart';
+import '../utils/formatters.dart';
 import 'database_service.dart';
 import 'schedule_service.dart';
 
@@ -451,7 +452,7 @@ class ExcelService {
           rapport.erreurs.add(LigneErreurImport(_feuilleMotos, numeroLigne, 'Statut invalide : "$statut".'));
           continue;
         }
-        final montant = double.tryParse(montantTxt);
+        final montant = _lireMontant(montantTxt);
         final valeurFreq = int.tryParse(valeurFreqTxt);
         final dateDebut = DateTime.tryParse(dateDebutTxt);
         if (montant == null || valeurFreq == null || dateDebut == null) {
@@ -560,7 +561,7 @@ class ExcelService {
             continue;
           }
           final dateEcheance = DateTime.tryParse(dateEcheanceTxt);
-          final montantPrevu = double.tryParse(montantPrevuTxt);
+          final montantPrevu = _lireMontant(montantPrevuTxt);
           if (dateEcheance == null || montantPrevu == null) {
             rapport.erreurs.add(
                 LigneErreurImport(_feuilleVersements, numeroLigne, 'Date d\'echeance ou montant prevu invalide.'));
@@ -569,7 +570,7 @@ class ExcelService {
           final dateValidation = dateValidationTxt != null ? DateTime.tryParse(dateValidationTxt) : null;
           // "Paye" sans montant : on considere le montant prevu comme recu,
           // sinon ce versement compterait comme impaye dans le solde.
-          final montantPaye = (montantPayeTxt != null ? double.tryParse(montantPayeTxt) : null) ??
+          final montantPaye = (montantPayeTxt != null ? _lireMontant(montantPayeTxt, zeroAccepte: true) : null) ??
               (statut == AppConstants.versementPaye ? montantPrevu : null);
 
           var idCible = !remplacementComplet && idTxte != null ? int.tryParse(idTxte) : null;
@@ -652,7 +653,7 @@ class ExcelService {
             categorieId = await db.insererCategorie(CategorieDepense(nom: categorieNom, icone: 'dots'));
             idCategorieParNom[categorieNom.toLowerCase()] = categorieId;
           }
-          final montant = double.tryParse(montantTxt);
+          final montant = _lireMontant(montantTxt);
           final date = DateTime.tryParse(dateTxt);
           if (montant == null || date == null) {
             rapport.erreurs.add(LigneErreurImport(_feuilleDepenses, numeroLigne, 'Montant ou date invalide.'));
@@ -872,7 +873,7 @@ class ExcelService {
                 .add(LigneErreurImport(_feuilleCategorieTransactions, numeroLigne, 'Type invalide : "$type".'));
             continue;
           }
-          final montant = double.tryParse(montantTxt);
+          final montant = _lireMontant(montantTxt);
           final date = DateTime.tryParse(dateTxt);
           if (montant == null || date == null) {
             rapport.erreurs
@@ -941,7 +942,7 @@ class ExcelService {
                 _feuilleDettes, numeroLigne, 'Champs obligatoires manquants (Nom personne, Montant initial, Date).'));
             continue;
           }
-          final montant = double.tryParse(montantTxt);
+          final montant = _lireMontant(montantTxt);
           final date = DateTime.tryParse(dateTxt);
           if (montant == null || date == null) {
             rapport.erreurs.add(LigneErreurImport(_feuilleDettes, numeroLigne, 'Montant initial ou date invalide.'));
@@ -1028,7 +1029,7 @@ class ExcelService {
                 LigneErreurImport(_feuilleRemboursements, numeroLigne, 'Dette introuvable (ID "$detteIdTxte").'));
             continue;
           }
-          final montant = double.tryParse(montantTxt);
+          final montant = _lireMontant(montantTxt);
           final date = DateTime.tryParse(dateTxt);
           if (montant == null || date == null) {
             rapport.erreurs.add(LigneErreurImport(_feuilleRemboursements, numeroLigne, 'Montant ou date invalide.'));
@@ -1277,7 +1278,7 @@ class ExcelService {
             rapport.erreurs.add(LigneErreurImport(_feuilleTransactions, numeroLigne, 'Type invalide : "$type".'));
             continue;
           }
-          final montant = double.tryParse(montantTxt);
+          final montant = _lireMontant(montantTxt);
           final date = DateTime.tryParse(dateTxt);
           if (montant == null || date == null) {
             rapport.erreurs.add(LigneErreurImport(_feuilleTransactions, numeroLigne, 'Montant ou date invalide.'));
@@ -1377,6 +1378,10 @@ class ExcelService {
 
     final db = DatabaseService.instance;
 
+    // Les echeances passees en dette sont relies a nouveau apres l'import
+    // (par l'ID du fichier, sinon par correspondance exacte) : une semaine
+    // n'est jamais a la fois en retard et dans Dettes.
+    final liens = remplacementComplet ? await db.liensEcheancesDettes() : <int, int>{};
     if (remplacementComplet) {
       await db.viderDettes();
     }
@@ -1405,7 +1410,7 @@ class ExcelService {
               _feuilleDettes, numeroLigne, 'Champs obligatoires manquants (Nom personne, Montant initial, Date).'));
           continue;
         }
-        final montant = double.tryParse(montantTxt);
+        final montant = _lireMontant(montantTxt);
         final date = DateTime.tryParse(dateTxt);
         if (montant == null || date == null) {
           rapport.erreurs.add(LigneErreurImport(_feuilleDettes, numeroLigne, 'Montant initial ou date invalide.'));
@@ -1485,7 +1490,7 @@ class ExcelService {
                 .add(LigneErreurImport(_feuilleRemboursements, numeroLigne, 'Dette introuvable (ID "$detteIdTxte").'));
             continue;
           }
-          final montant = double.tryParse(montantTxt);
+          final montant = _lireMontant(montantTxt);
           final date = DateTime.tryParse(dateTxt);
           if (montant == null || date == null) {
             rapport.erreurs.add(LigneErreurImport(_feuilleRemboursements, numeroLigne, 'Montant ou date invalide.'));
@@ -1516,6 +1521,13 @@ class ExcelService {
           rapport.erreurs.add(LigneErreurImport(_feuilleRemboursements, numeroLigne, 'Erreur inattendue : $e'));
         }
       }
+    }
+
+    for (final lien in liens.entries) {
+      await db.lierVersementADette(lien.key, idDetteFichierVersDb[lien.value]);
+    }
+    for (final motoId in motosIds) {
+      await db.normaliser(motoId);
     }
 
     return rapport;
@@ -1657,6 +1669,18 @@ class ExcelService {
 
   static String _iso(DateTime d) => d.toIso8601String().substring(0, 10);
 
+  /// Montant d'une cellule : d'abord la regle de saisie de l'app
+  /// ([lireMontant] : "10.000" ou "10 000" = 10 000, pas 10), sinon un
+  /// nombre (cellule numerique "50000.0", historique a decimales). Toujours
+  /// positif ; 0 seulement si [zeroAccepte] (ex : montant paye).
+  static double? _lireMontant(String? texte, {bool zeroAccepte = false}) {
+    final t = texte?.trim();
+    if (t == null || t.isEmpty) return null;
+    final montant = lireMontant(t) ?? double.tryParse(t);
+    if (montant == null || montant.isNaN || montant.isInfinite) return null;
+    return montant > 0 || (zeroAccepte && montant == 0) ? montant : null;
+  }
+
   /// "2026-09-14:60000; 2026-12-01:65000" (colonne "Changements de montant").
   static String _ecrireChangements(List<ChangementMontant> changements) =>
       changements.map((c) {
@@ -1672,7 +1696,7 @@ class ExcelService {
       if (morceau.trim().isEmpty) continue;
       final parties = morceau.split(':');
       final date = parties.length == 2 ? DateTime.tryParse(parties[0].trim()) : null;
-      final montant = parties.length == 2 ? double.tryParse(parties[1].trim()) : null;
+      final montant = parties.length == 2 ? _lireMontant(parties[1]) : null;
       if (date == null || montant == null) return null;
       changements.add((depuis: ScheduleService.dateSeule(date), montant: montant));
     }

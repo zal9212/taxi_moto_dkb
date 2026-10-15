@@ -32,7 +32,7 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
   double _totalVerse = 0;
   /// Part de la caisse venant des remboursements de dettes liees a la moto.
   double _remboursementsDettes = 0;
-  /// Solde net : negatif = retard (dette), positif = avance (credit).
+  /// Retard et avance, separes (voir [ScheduleService.compte]).
   CompteMoto _compte = (retard: 0.0, avance: 0.0);
   String _devise = AppConstants.devisePardDefaut;
   List<Dette> _dettes = [];
@@ -151,7 +151,8 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
       }
     }
     if (!mounted) return;
-    final controleur = TextEditingController(text: v.montantPrevu.toStringAsFixed(0));
+    // Ce qui reste du (une echeance peut deja avoir recu une partie).
+    final controleur = TextEditingController(text: ScheduleService.resteDu(v).toStringAsFixed(0));
     final confirme = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -243,7 +244,7 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
         title: const Text('Marquer en dette ?'),
         content: Text(
           'Le versement du ${formaterDate(v.dateEcheance)} '
-          '(${formaterMontant(v.montantPrevu - (v.montantPaye ?? 0), _devise)}) sera suivi dans Dettes, '
+          '(${formaterMontant(ScheduleService.resteDu(v), _devise)}) sera suivi dans Dettes, '
           'lie a cette moto, et ne comptera plus dans le retard. Quand le chauffeur paiera, ajoutez '
           'un remboursement : l\'argent ira dans la caisse de la moto et l\'echeance affichera « Rembourse ».',
         ),
@@ -445,7 +446,7 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     }
     await _charger();
     if (!mounted) return;
-    final resteDu = _periodesDues().fold<double>(0, (t, p) => t + p.reste);
+    final resteDu = _compte.retard; // meme chiffre que la fiche et la relance
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text('${formaterMontant(montant, _devise)} encaisses.'),
       action: SnackBarAction(
@@ -555,10 +556,9 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
 
     if (!estActive) {
       // Reactivation apres une pause : la moto n'a pas travaille pendant
-      // ce temps, ses echeances non payees d'avant la pause ne doivent
-      // donc pas compter comme du retard - on repart d'une fenetre
-      // fraiche a partir d'aujourd'hui plutot que de la date ou elle
-      // s'etait arretee.
+      // ce temps, les echeances tombees pendant la pause ne comptent pas
+      // (les retards d'avant la pause restent dus) - on repart d'une
+      // fenetre fraiche a partir d'aujourd'hui.
       await _db.redemarrerEcheancesApresReactivation(motoMisAJour);
       final nouveauxVersements = await _db.listerVersementsParMoto(motoMisAJour.id!);
       final params = await _db.obtenirParametres();
@@ -789,7 +789,8 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
                     style: TextStyle(color: AppColors.texteGris, fontSize: 11),
                   ),
                   // Retard et avance separes : une avance ne cache pas un retard.
-                  if (moto.statut == AppConstants.motoActive) ...[
+                  // Moto suspendue : ses retards d'avant la pause restent dus.
+                  ...[
                     for (final (montant, enRetard) in [(_compte.retard, true), (_compte.avance, false)])
                       if (montant > 0) ...[
                         const SizedBox(height: 10),
@@ -874,7 +875,8 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
   }
 
   Widget _ligneDette(Dette d) {
-    final solde = _soldeParDette[d.id] ?? d.montantInitial;
+    // Jamais negatif a l'ecran : une dette trop remboursee est "Remboursee".
+    final solde = (_soldeParDette[d.id] ?? d.montantInitial).clamp(0, double.infinity).toDouble();
     return InkWell(
       onTap: () async {
         await Navigator.push(context, MaterialPageRoute(builder: (_) => DetteDetailScreen(detteId: d.id!)));
@@ -927,18 +929,20 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     final estDette = v.statut == AppConstants.versementEnDette;
     // Une echeance passee en dette se suit dans Dettes : reste du, ou "Rembourse".
     final resteDette = estDette ? _soldeParDette[v.detteId] : null;
-    final passeeNonPayee = !estPaye && !estDette && v.dateEcheance.isBefore(ScheduleService.aujourdHui());
+    // Meme regle que les calculs : une semaine de pause n'est pas due.
+    final passeeNonPayee = !estPaye && !estDette && ScheduleService.estDue(v, _moto!, ScheduleService.aujourdHui());
 
-    // Meme libelle que le releve PDF (voir [ligneVersement]).
-    final libelle =
-        ligneVersement(v, dette: _detteDe(v.detteId), aujourdHui: ScheduleService.aujourdHui(), devise: _devise).libelle;
+    // Meme libelle et meme montant que le releve PDF (voir [ligneVersement]).
+    final ligne =
+        ligneVersement(v, moto: _moto!, dette: _detteDe(v.detteId), aujourdHui: ScheduleService.aujourdHui(), devise: _devise);
+    final libelle = ligne.libelle;
     final Color couleur;
     if (estPaye) {
       // Paye en partie : le reste sera complete au prochain encaissement.
       couleur = ScheduleService.resteDu(v) > 0 ? AppColors.danger : AppColors.succes;
     } else if (estDette) {
       couleur = resteDette != null && resteDette <= 0 ? AppColors.succes : AppColors.danger;
-    } else if (passeeNonPayee || v.statut == AppConstants.versementEnRetard) {
+    } else if (passeeNonPayee) {
       couleur = AppColors.danger;
     } else {
       couleur = AppColors.texteGris;
@@ -975,7 +979,7 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
               ),
             ),
             Text(
-              formaterMontant(v.montantPaye ?? v.montantPrevu, _devise),
+              formaterMontant(ligne.paye ?? v.montantPrevu, _devise),
               style: TextStyle(
                 color: estPaye ? AppColors.succes : AppColors.texteNoir,
                 fontWeight: FontWeight.w600,

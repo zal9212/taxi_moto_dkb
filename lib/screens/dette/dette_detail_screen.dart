@@ -148,7 +148,7 @@ class _DetteDetailScreenState extends State<DetteDetailScreen> {
                       context: context,
                       initialDate: date,
                       firstDate: DateTime(2015),
-                      lastDate: DateTime(2100),
+                      lastDate: DateTime.now(), // l'argent ne peut pas avoir ete recu demain
                     );
                     if (choisie != null) setStateDialog(() => date = choisie);
                   },

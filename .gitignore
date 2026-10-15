@@ -46,3 +46,6 @@ app.*.map.json
 /ios/Flutter/ephemeral/
 /ios/Pods/
 /ios/.symlinks/
+
+# Carte du code generee par graphify (outil local)
+graphify-out/

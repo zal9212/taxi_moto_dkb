@@ -5,7 +5,9 @@ import 'package:timezone/data/latest.dart' as tzdata;
 import '../core/constants.dart';
 import '../models/moto.dart';
 import '../models/versement.dart';
+import '../utils/formatters.dart';
 import 'database_service.dart';
+import 'schedule_service.dart';
 
 /// Planifie des rappels locaux avant chaque échéance de versement.
 /// Le délai de rappel (en heures avant l'échéance) est configurable
@@ -56,18 +58,18 @@ class NotificationService {
   }) async {
     if (versement.id == null) return;
     final d = versement.dateEcheance;
-    final montant = versement.montantPrevu.toStringAsFixed(0);
+    final montant = formaterNombre(ScheduleService.resteDu(versement)); // ce qui reste a payer
 
     await _programmer(
       versement.id!, // id unique = id du versement, permet d'annuler facilement
       'Versement a venir - ${moto.nom}',
-      'Echeance de $montant prevue le ${_formaterDate(d)}',
+      'Echeance de $montant prevue le ${formaterDate(d)}',
       d.subtract(Duration(hours: delaiHeures)),
     );
     await _programmer(
       versement.id! + _decalageAlerteRetard,
       'Versement non recu - ${moto.nom}',
-      '${moto.chauffeur} n\'a pas encore paye l\'echeance du ${_formaterDate(d)} ($montant). '
+      '${moto.chauffeur} n\'a pas encore paye l\'echeance du ${formaterDate(d)} ($montant). '
           'Pensez a relancer.',
       DateTime(d.year, d.month, d.day + 1, 9),
     );
@@ -130,11 +132,13 @@ class NotificationService {
   }
 
   /// Complète les échéances d'une moto active (fenêtre glissante) et
-  /// programme les rappels de celles qui viennent d'être créées — sans ça,
-  /// les rappels s'arrêtaient après les premières échéances de la moto.
+  /// resynchronise ses rappels — à chaque fois : un paiement, une dette ou
+  /// une normalisation (argent déplacé vers une semaine plus ancienne) change
+  /// les échéances à rappeler, pas seulement leur création.
   static Future<void> assurerEcheancesEtRappels(Moto moto) async {
     final db = DatabaseService.instance;
-    if (moto.id == null || await db.assurerEcheances(moto) == 0) return;
+    if (moto.id == null) return;
+    await db.assurerEcheances(moto);
     // Le rappel est secondaire : un echec du plugin de notifications ne
     // doit pas bloquer le chargement des ecrans qui appellent ceci.
     try {
@@ -168,9 +172,5 @@ class NotificationService {
         }
       }
     }
-  }
-
-  static String _formaterDate(DateTime d) {
-    return '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}/${d.year}';
   }
 }

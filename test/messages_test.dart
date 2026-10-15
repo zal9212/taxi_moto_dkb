@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:moto_taxi_douka/core/constants.dart';
+import 'package:moto_taxi_douka/models/moto.dart';
 import 'package:moto_taxi_douka/models/versement.dart';
 import 'package:moto_taxi_douka/utils/formatters.dart';
 import 'package:moto_taxi_douka/utils/messages.dart';
@@ -61,10 +62,13 @@ void main() {
     final aujourdHui = DateTime(2026, 10, 14);
     Versement v(String statut, {double? paye}) => Versement(
         motoId: 1, dateEcheance: DateTime(2026, 10, 7), montantPrevu: 185000, montantPaye: paye, statut: statut);
-    String libelle(Versement x, {({double rembourse, double reste})? dette}) =>
-        ligneVersement(x, dette: dette, aujourdHui: aujourdHui, devise: 'FG').libelle;
+    final moto = Moto(
+        id: 1, nom: 'TVs', chauffeur: 'A', montantVersement: 185000,
+        frequenceType: AppConstants.freqHebdomadaire, frequenceValeur: DateTime.monday, dateDebut: DateTime(2026, 9, 7));
+    String libelle(Versement x, {({double rembourse, double reste})? dette, Moto? m}) =>
+        ligneVersement(x, moto: m ?? moto, dette: dette, aujourdHui: aujourdHui, devise: 'FG').libelle;
     double? paye(Versement x, {({double rembourse, double reste})? dette}) =>
-        ligneVersement(x, dette: dette, aujourdHui: aujourdHui, devise: 'FG').paye;
+        ligneVersement(x, moto: moto, dette: dette, aujourdHui: aujourdHui, devise: 'FG').paye;
 
     final enDette = v(AppConstants.versementEnDette);
     expect(libelle(enDette, dette: (rembourse: 100000, reste: 85000)), 'Dette (reste ${formaterMontant(85000, 'FG')})');
@@ -76,6 +80,9 @@ void main() {
     expect(libelle(v(AppConstants.versementPaye, paye: 185000)), 'Paye');
     expect(libelle(v(AppConstants.versementPaye, paye: 85000)), 'Partiel (reste ${formaterMontant(100000, 'FG')})');
     expect(libelle(v(AppConstants.versementEnRetard)), 'En retard');
+    // Semaine tombee pendant la pause d'une moto suspendue : pas due, pas "En retard".
+    expect(libelle(v(AppConstants.versementEnAttente), m: moto.copyWith(statut: AppConstants.motoSuspendue)),
+        'Pendant la pause (non du)');
     expect(paye(v(AppConstants.versementEnRetard)), isNull);
   });
 }

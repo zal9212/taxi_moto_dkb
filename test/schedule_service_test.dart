@@ -316,9 +316,9 @@ void main() {
 
     test('les periodes proposees suivent la frequence : dues, a venir, puis les suivantes', () {
       final periodes = ScheduleService.periodesChoisissables(
-          moto: m, existants: existants, changements: const [], aujourdHui: aujourdHui, futures: 2);
+          moto: m, existants: existants, changements: const [], aujourdHui: aujourdHui);
 
-      expect(periodes.map((p) => p.date), [
+      expect(periodes.take(8).map((p) => p.date), [
         DateTime(2026, 9, 14),
         DateTime(2026, 9, 21),
         DateTime(2026, 10, 5),

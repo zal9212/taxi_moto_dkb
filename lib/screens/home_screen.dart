@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import '../core/constants.dart';
 import '../core/theme.dart';
 import '../models/moto.dart';
-import '../models/versement.dart';
 import '../models/parametre.dart';
 import '../services/database_service.dart';
 import '../services/notification_service.dart';
@@ -106,8 +105,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       fin: bornes.fin,
     );
     // Retard compte moto par moto : l'avance de l'une ne compense pas le
-    // retard d'une autre, et les motos suspendues n'entrent pas en compte.
-    final comptes = await _db.comptesMotosActives(motoId: _motoFiltreId);
+    // retard d'une autre ; une moto suspendue garde ses retards d'avant la pause.
+    final comptes = await _db.comptesMotos(motoId: _motoFiltreId);
 
     final paiementsRecents = await _db.listerPaiementsRecents(
       motoId: _motoFiltreId,
@@ -488,9 +487,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         items.sort((a, b) => a.moto.nom.toLowerCase().compareTo(b.moto.nom.toLowerCase()));
         break;
       case _TriMoto.retard:
-        // Solde le plus negatif (plus grosse dette) en premier.
-        // Les plus en retard d'abord.
-        items.sort((a, b) => (a.compte.avance - a.compte.retard).compareTo(b.compte.avance - b.compte.retard));
+        // Les plus en retard d'abord (une avance ne compense pas un retard).
+        items.sort((a, b) => b.compte.retard.compareTo(a.compte.retard));
         break;
       case _TriMoto.recentes:
         break; // ordre deja fourni par listerMotos (date_creation DESC)
@@ -582,7 +580,7 @@ class _MotoAvecInfos {
   final Moto moto;
   final double totalVerse;
   final CompteMoto compte;
-  final Versement? prochain;
+  final ({DateTime date, String etat, double reste})? prochain;
 
   _MotoAvecInfos({
     required this.moto,

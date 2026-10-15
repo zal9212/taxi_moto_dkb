@@ -2,10 +2,11 @@ import 'package:intl/intl.dart';
 
 /// Formatte un montant avec séparateur de milliers + le symbole de devise
 /// choisi par l'utilisateur dans les Réglages (jamais codé en dur ailleurs).
-String formaterMontant(double montant, String devise) {
-  final formateur = NumberFormat('#,##0', 'fr_FR');
-  return '${formateur.format(montant)} $devise';
-}
+String formaterMontant(double montant, String devise) => '${formaterNombre(montant)} $devise';
+
+/// Le nombre seul, separateur de milliers compris (meme ecriture partout :
+/// ecrans, PDF, rappels).
+String formaterNombre(double montant) => NumberFormat('#,##0', 'fr_FR').format(montant);
 
 /// Lit un montant saisi : "50000", "10 000", "10.000" ou "10,000", y compris
 /// tel que [formaterMontant] l'affiche. Comme l'affichage, sans centimes :
@@ -25,9 +26,9 @@ String? normaliserDevise(String saisie) {
   return devise.isEmpty ? null : devise;
 }
 
-String formaterDate(DateTime date) {
-  return DateFormat('dd/MM/yyyy', 'fr_FR').format(date);
-}
+/// jj/mm/aaaa : motif numerique, sans donnees de langue a charger (utilisable
+/// partout, y compris les rappels et la base).
+String formaterDate(DateTime date) => DateFormat('dd/MM/yyyy').format(date);
 
 String formaterDateCourte(DateTime date) {
   return DateFormat('dd MMM', 'fr_FR').format(date);

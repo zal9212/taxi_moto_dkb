@@ -6,6 +6,7 @@ import '../models/moto.dart';
 import '../models/versement.dart';
 import '../models/depense.dart';
 import '../models/dette.dart';
+import '../utils/formatters.dart';
 import '../utils/messages.dart';
 import 'schedule_service.dart';
 
@@ -42,15 +43,15 @@ class PdfService {
                 style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold)),
           ),
           pw.Text('Chauffeur : ${moto.chauffeur}'),
-          pw.Text('Montant par versement : ${moto.montantVersement.toStringAsFixed(0)} $deviseSymbole'),
-          pw.Text('Total encaisse : ${totalEncaisse.toStringAsFixed(0)} $deviseSymbole'),
+          pw.Text('Montant par versement : ${_n(moto.montantVersement)} $deviseSymbole'),
+          pw.Text('Total encaisse : ${_n(totalEncaisse)} $deviseSymbole'),
           if (remboursementsDettes > 0)
-            pw.Text('  dont ${remboursementsDettes.toStringAsFixed(0)} $deviseSymbole de remboursements de dettes'),
+            pw.Text('  dont ${_n(remboursementsDettes)} $deviseSymbole de remboursements de dettes'),
           pw.Text(compte.retard > 0
-              ? 'En retard de : ${compte.retard.toStringAsFixed(0)} $deviseSymbole'
+              ? 'En retard de : ${_n(compte.retard)} $deviseSymbole'
               : 'Retard : aucun (a jour)'),
-          if (compte.avance > 0) pw.Text('Paye d\'avance : ${compte.avance.toStringAsFixed(0)} $deviseSymbole'),
-          pw.Text('Total depenses (huile, reparations...) : ${totalDepenses.toStringAsFixed(0)} $deviseSymbole'),
+          if (compte.avance > 0) pw.Text('Paye d\'avance : ${_n(compte.avance)} $deviseSymbole'),
+          pw.Text('Total depenses (huile, reparations...) : ${_n(totalDepenses)} $deviseSymbole'),
           pw.SizedBox(height: 16),
 
           pw.Text('Historique des versements',
@@ -61,13 +62,13 @@ class PdfService {
             data: versements.map((v) {
               // Meme libelle que la fiche ; une echeance en dette compte ses remboursements.
               final ligne = ligneVersement(v,
-                  dette: detteDe(v.detteId), aujourdHui: aujourdHui, devise: deviseSymbole);
+                  moto: moto, dette: detteDe(v.detteId), aujourdHui: aujourdHui, devise: deviseSymbole);
               return [
-                _formaterDate(v.dateEcheance),
+                formaterDate(v.dateEcheance),
                 ligne.libelle,
-                v.montantPrevu.toStringAsFixed(0),
-                ligne.paye?.toStringAsFixed(0) ?? '-',
-                v.dateValidation != null ? _formaterDate(v.dateValidation!) : '-',
+                _n(v.montantPrevu),
+                ligne.paye == null ? '-' : _n(ligne.paye!),
+                v.dateValidation != null ? formaterDate(v.dateValidation!) : '-',
               ];
             }).toList(),
             cellStyle: const pw.TextStyle(fontSize: 9),
@@ -83,11 +84,11 @@ class PdfService {
               data: dettes.map((d) {
                 final etat = detteDe(d.id);
                 return [
-                  _formaterDate(d.date),
+                  formaterDate(d.date),
                   d.notes ?? '-',
-                  d.montantInitial.toStringAsFixed(0),
-                  etat?.rembourse.toStringAsFixed(0) ?? '-',
-                  etat == null ? '-' : etat.reste <= 0 ? 'Rembourse' : etat.reste.toStringAsFixed(0),
+                  _n(d.montantInitial),
+                  etat == null ? '-' : _n(etat.rembourse),
+                  etat == null ? '-' : etat.reste <= 0 ? 'Rembourse' : _n(etat.reste),
                 ];
               }).toList(),
               cellStyle: const pw.TextStyle(fontSize: 9),
@@ -103,8 +104,8 @@ class PdfService {
             headers: ['Date', 'Montant', 'Description'],
             data: depenses
                 .map((d) => [
-                      _formaterDate(d.date),
-                      d.montant.toStringAsFixed(0),
+                      formaterDate(d.date),
+                      _n(d.montant),
                       d.description ?? '-',
                     ])
                 .toList(),
@@ -152,10 +153,10 @@ class PdfService {
       return [
         m.nom,
         m.chauffeur,
-        verse.toStringAsFixed(0),
-        retard.toStringAsFixed(0),
-        avance.toStringAsFixed(0),
-        dep.toStringAsFixed(0),
+        _n(verse),
+        _n(retard),
+        _n(avance),
+        _n(dep),
       ];
     }).toList();
 
@@ -168,7 +169,7 @@ class PdfService {
             child: pw.Text('Rapport general - Toutes les motos',
                 style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold)),
           ),
-          pw.Text('Genere le ${_formaterDate(DateTime.now())}'),
+          pw.Text('Genere le ${formaterDate(DateTime.now())}'),
           pw.SizedBox(height: 16),
           pw.Table.fromTextArray(
             headers: ['Moto', 'Chauffeur', 'Total encaisse', 'En retard', 'En avance', 'Depenses'],
@@ -179,13 +180,13 @@ class PdfService {
           pw.SizedBox(height: 20),
           pw.Divider(),
           pw.SizedBox(height: 8),
-          pw.Text('Total general encaisse : ${totalGeneralVerse.toStringAsFixed(0)} $deviseSymbole',
+          pw.Text('Total general encaisse : ${_n(totalGeneralVerse)} $deviseSymbole',
               style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),
-          pw.Text('Total general en retard : ${totalGeneralRetard.toStringAsFixed(0)} $deviseSymbole',
+          pw.Text('Total general en retard : ${_n(totalGeneralRetard)} $deviseSymbole',
               style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),
-          pw.Text('Total general en avance : ${totalGeneralAvance.toStringAsFixed(0)} $deviseSymbole',
+          pw.Text('Total general en avance : ${_n(totalGeneralAvance)} $deviseSymbole',
               style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),
-          pw.Text('Total general depenses : ${totalGeneralDepenses.toStringAsFixed(0)} $deviseSymbole',
+          pw.Text('Total general depenses : ${_n(totalGeneralDepenses)} $deviseSymbole',
               style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold)),
         ],
       ),
@@ -197,11 +198,11 @@ class PdfService {
     );
   }
 
-  static String _formaterDate(DateTime d) {
-    return '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}/${d.year}';
-  }
+  /// Nombre ecrit comme dans l'app ([formaterNombre]), avec une espace simple
+  /// : la police integree du PDF n'a pas l'espace fine.
+  static String _n(double montant) => formaterNombre(montant).replaceAll('\u202F', ' ').replaceAll('\u00A0', ' ');
 
-  /// Comme [_formaterDate] mais sans '/' : utilisable dans un nom de fichier
+  /// Comme [formaterDate] mais sans '/' : utilisable dans un nom de fichier
   /// (le '/' y serait interprete comme un separateur de dossier et ferait
   /// echouer l'ecriture du PDF).
   static String _formaterDateFichier(DateTime d) {

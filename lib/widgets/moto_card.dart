@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import '../core/constants.dart';
 import '../core/theme.dart';
 import '../models/moto.dart';
-import '../models/versement.dart';
 import '../services/schedule_service.dart';
 import '../utils/formatters.dart';
 
@@ -12,7 +11,8 @@ class MotoCard extends StatelessWidget {
   final double totalVerse;
   /// Retard et avance (voir [ScheduleService.compte]).
   final CompteMoto compte;
-  final Versement? prochainVersement;
+  /// Prochaine periode a payer et ce qu'il en reste (la plus ancienne d'abord).
+  final ({DateTime date, String etat, double reste})? prochainVersement;
   final String devise;
   final VoidCallback onTap;
 
@@ -71,14 +71,15 @@ class MotoCard extends StatelessWidget {
               formaterMontant(totalVerse, devise),
               style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
             ),
-            if (!estInactive && estEnRetard) ...[
+            // Moto suspendue : ses retards d'avant la pause restent dus.
+            if (estEnRetard) ...[
               const SizedBox(height: 4),
               Text(
                 'En retard de ${formaterMontant(compte.retard, devise)}',
                 style: const TextStyle(color: AppColors.danger, fontSize: 10, fontWeight: FontWeight.w600),
               ),
             ],
-            if (!estInactive && estEnAvance) ...[
+            if (estEnAvance) ...[
               const SizedBox(height: 4),
               Text(
                 'Paye d\'avance : ${formaterMontant(compte.avance, devise)}',
@@ -91,11 +92,11 @@ class MotoCard extends StatelessWidget {
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text(
-                    'Prochain: ${formaterDate(prochainVersement!.dateEcheance)}',
+                    'Prochain: ${formaterDate(prochainVersement!.date)}',
                     style: TextStyle(color: AppColors.texteGris, fontSize: 10),
                   ),
                   Text(
-                    formaterMontant(prochainVersement!.montantPrevu, devise),
+                    formaterMontant(prochainVersement!.reste, devise),
                     style: TextStyle(color: AppColors.texteGris, fontSize: 10),
                   ),
                 ],

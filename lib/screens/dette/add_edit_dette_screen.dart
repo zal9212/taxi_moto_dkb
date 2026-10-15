@@ -42,6 +42,9 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
   DateTime _date = DateTime.now();
 
   late bool _lienFige;
+  /// Dette nee d'une echeance : moto et montant fixes (voir
+  /// [DatabaseService.detteVientDUneEcheance]).
+  bool _deEcheance = false;
   String? _lienType;
   int? _lienId;
   String? _lienNom;
@@ -102,8 +105,13 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
     final motos = await _db.listerMotos();
     final categories = await _db.listerCategoriesActivite();
     final params = await _db.obtenirParametres();
+    final deEcheance = _modeEdition && await _db.detteVientDUneEcheance(widget.detteExistante!.id!);
     if (!mounted) return;
     setState(() {
+      // Changer sa moto ou son montant ferait sortir ses remboursements de la
+      // caisse de la moto et fausserait la ligne de l'echeance.
+      _deEcheance = deEcheance;
+      if (deEcheance) _lienFige = true;
       _motos = motos;
       _categories = categories;
       _deviseGlobale = params.deviseSymbole;
@@ -237,7 +245,11 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
                     const SizedBox(height: 12),
                     TextFormField(
                       controller: _montantCtrl,
-                      decoration: InputDecoration(labelText: 'Montant prete (${_deviseEffectiveAffichee()})'),
+                      readOnly: _deEcheance,
+                      decoration: InputDecoration(
+                        labelText: 'Montant prete (${_deviseEffectiveAffichee()})',
+                        helperText: _deEcheance ? 'Fixe par l\'echeance de la moto' : null,
+                      ),
                       keyboardType: TextInputType.number,
                       validator: (v) => lireMontant(v) == null ? 'Montant invalide' : null,
                     ),

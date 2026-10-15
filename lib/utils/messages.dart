@@ -1,4 +1,5 @@
 import '../core/constants.dart';
+import '../models/moto.dart';
 import '../models/versement.dart';
 import '../services/schedule_service.dart';
 import 'formatters.dart';
@@ -45,6 +46,7 @@ String messageRecu({
 /// remboursements de sa [dette] (null : dette introuvable).
 ({String libelle, double? paye}) ligneVersement(
   Versement v, {
+  required Moto moto,
   ({double rembourse, double reste})? dette,
   required DateTime aujourdHui,
   required String devise,
@@ -63,7 +65,13 @@ String messageRecu({
         paye: (v.montantPaye ?? 0) + dette.rembourse,
       );
     default:
-      final enRetard = v.statut == AppConstants.versementEnRetard || v.dateEcheance.isBefore(aujourdHui);
-      return (libelle: enRetard ? 'En retard' : 'A venir', paye: v.montantPaye);
+      // Meme regle que les calculs (ScheduleService.estDue) : une semaine
+      // tombee pendant la pause d'une moto suspendue n'est pas due.
+      final libelle = ScheduleService.estDue(v, moto, aujourdHui)
+          ? 'En retard'
+          : v.dateEcheance.isBefore(aujourdHui)
+              ? 'Pendant la pause (non du)'
+              : 'A venir';
+      return (libelle: libelle, paye: v.montantPaye);
   }
 }

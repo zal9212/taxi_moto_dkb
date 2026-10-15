@@ -239,6 +239,17 @@ class ScheduleService {
     return (retard: retard, avance: avance);
   }
 
+  /// Nouvelle échéance du jour [d] : au montant en vigueur ce jour-là, déjà
+  /// "en retard" si son jour est passé (même règle que
+  /// DatabaseService.actualiserRetards). Seule façon de créer une échéance.
+  static Versement nouvelleEcheance(Moto moto, List<ChangementMontant> changements, DateTime d, DateTime aujourdHui) =>
+      Versement(
+        motoId: moto.id!,
+        dateEcheance: d,
+        montantPrevu: montantAu(moto, changements, d),
+        statut: d.isBefore(aujourdHui) ? AppConstants.versementEnRetard : AppConstants.versementEnAttente,
+      );
+
   /// Ce qui reste dû sur une échéance (0 si payée en entier ou passée en
   /// dette).
   static double resteDu(Versement v) {
@@ -282,18 +293,17 @@ class ScheduleService {
           .toList();
 
   /// Periodes proposees pour un versement : celles a payer (dues et a
-  /// venir), puis les [futures] suivantes du rythme, pas encore creees (au
+  /// venir), puis les 8 suivantes du rythme, pas encore creees (au
   /// montant en vigueur a leur date) pour payer d'avance.
   static List<({DateTime date, String etat, double reste})> periodesChoisissables({
     required Moto moto,
     required List<Versement> existants,
     required List<ChangementMontant> changements,
     required DateTime aujourdHui,
-    int futures = 8,
   }) =>
       [
         ...periodesAPayer(existants: existants, moto: moto, aujourdHui: aujourdHui),
-        ..._periodesSuivantes(moto, existants, changements).take(futures),
+        ..._periodesSuivantes(moto, existants, changements).take(8),
       ];
 
   /// Periodes du rythme apres la derniere echeance existante.
@@ -339,12 +349,12 @@ class ScheduleService {
       restant -= part;
     }
 
-    // ponytail: 1000 periodes max, garde-fou si un montant prevu vaut 0.
     if (selection != null) {
       for (final p in univers.takeWhile((p) => !p.date.isAfter(derniere!))) {
         if (selection.contains(p.date)) payer(p);
       }
     }
+    // ponytail: 1000 periodes max, garde-fou si un montant prevu vaut 0.
     for (final p in univers.where((p) => derniere == null || p.date.isAfter(derniere)).take(1000)) {
       if (restant <= 0) break;
       payer(p);
