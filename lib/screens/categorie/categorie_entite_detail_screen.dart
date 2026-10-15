@@ -37,6 +37,8 @@ class _CategorieEntiteDetailScreenState extends State<CategorieEntiteDetailScree
   List<Dette> _dettes = [];
   final Map<int, double> _soldeParDette = {};
   double _solde = 0;
+  /// Part du solde venant des remboursements de dettes liees a l'entite.
+  double _remboursements = 0;
   List<CategorieGerant> _gerants = [];
   Map<int?, double> _soldesPersonnes = {};
   Set<int> _avecAudio = {};
@@ -64,6 +66,7 @@ class _CategorieEntiteDetailScreenState extends State<CategorieEntiteDetailScree
     }
     final transactions = await _db.listerTransactionsEntite(widget.entiteId);
     final solde = await _db.soldeEntiteCategorie(widget.entiteId);
+    final remboursements = (await _db.remboursementsEntites(entiteId: widget.entiteId))[widget.entiteId] ?? 0;
     final gerants = await _db.listerGerants(widget.entiteId);
     final soldesPersonnes = await _db.soldesParPersonne(widget.entiteId);
     final avecAudio = await _db.transactionsAvecAudio(widget.entiteId);
@@ -78,6 +81,7 @@ class _CategorieEntiteDetailScreenState extends State<CategorieEntiteDetailScree
       _entite = entite;
       _transactions = transactions;
       _solde = solde;
+      _remboursements = remboursements;
       _gerants = gerants;
       _soldesPersonnes = soldesPersonnes;
       _avecAudio = avecAudio;
@@ -251,6 +255,9 @@ class _CategorieEntiteDetailScreenState extends State<CategorieEntiteDetailScree
                           color: _solde < 0 ? const Color(0xFFE2554A) : Colors.white,
                           fontSize: 22,
                           fontWeight: FontWeight.w600)),
+                  if (_remboursements > 0)
+                    Text('dont ${formaterMontant(_remboursements, devise)} de remboursements de dettes',
+                        style: TextStyle(color: AppColors.texteGris, fontSize: 10)),
                   const SizedBox(height: 14),
                   SizedBox(
                     width: double.infinity,

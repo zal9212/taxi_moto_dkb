@@ -305,6 +305,13 @@ void main() {
     test('une base v7 garde ses operations, toutes sur le compte du proprietaire', () async {
       await ancienneBase(7, sql: [
         ...tablesV3,
+        // Tables des dettes, presentes dans toute base v7 (le solde d'une
+        // boutique compte les remboursements de ses dettes).
+        'CREATE TABLE dettes (id INTEGER PRIMARY KEY AUTOINCREMENT, nom_personne TEXT NOT NULL, '
+            'montant_initial REAL NOT NULL, date TEXT NOT NULL, notes TEXT, date_creation TEXT NOT NULL, '
+            'lien_type TEXT, lien_id INTEGER, devise_symbole TEXT)',
+        'CREATE TABLE dette_remboursements (id INTEGER PRIMARY KEY AUTOINCREMENT, dette_id INTEGER NOT NULL, '
+            'montant REAL NOT NULL, date TEXT NOT NULL, notes TEXT)',
         "INSERT INTO categorie_transactions (entite_id, type, montant, date) "
             "VALUES (1, 'revenu', 30000, '2026-09-01T00:00:00.000')",
       ]);
@@ -1248,6 +1255,17 @@ void main() {
     double recalcul(List<CategorieTransaction> ops) =>
         ops.fold(0, (t, o) => o.type == revenu ? t + o.montant : t - o.montant);
 
+    /// Remboursements des dettes liees a une entite, relus dette par dette.
+    Future<double> rembourse(int entiteId) async {
+      var total = 0.0;
+      for (final d in await db.listerDettesParLien(AppConstants.detteLienCategorieEntite, entiteId)) {
+        for (final r in await db.listerRemboursements(d.id!)) {
+          total += r.montant;
+        }
+      }
+      return total;
+    }
+
     Future<void> verifier(String etape) async {
       for (final c in [boutiques, taxis]) {
         final entites = await db.listerEntitesCategorie(c);
@@ -1258,11 +1276,12 @@ void main() {
           final ops = await db.listerTransactionsEntite(e.id!);
           final solde = await db.soldeEntiteCategorie(e.id!);
           final parPersonne = await db.soldesParPersonne(e.id!);
-          // 1. Boutique = somme des personnes = recalcul de ses operations.
-          expect(solde, recalcul(ops), reason: '$etape : solde de ${e.nom}');
+          final remb = await rembourse(e.id!);
+          // 1. Boutique = somme des personnes = recalcul de ses operations + remboursements de ses dettes.
+          expect(solde, recalcul(ops) + remb, reason: '$etape : solde de ${e.nom}');
           expect(parPersonne.values.fold<double>(0, (t, s) => t + s), solde, reason: '$etape : personnes de ${e.nom}');
           for (final p in parPersonne.entries) {
-            expect(p.value, recalcul(ops.where((o) => o.gerantId == p.key).toList()),
+            expect(p.value, recalcul(ops.where((o) => o.gerantId == p.key).toList()) + (p.key == null ? remb : 0),
                 reason: '$etape : compte ${p.key ?? 'proprietaire'} de ${e.nom}');
           }
           sommeBoutiques += solde;
@@ -1270,8 +1289,13 @@ void main() {
         // 2. Categorie = somme de ses boutiques = recalcul de toutes ses operations.
         final totaux = await db.totauxCategorie(c);
         final opsCategorie = await db.listerTransactionsCategorie(c);
-        expect(totaux.revenus - totaux.depenses, sommeBoutiques, reason: '$etape : total categorie $c');
-        expect(totaux.revenus - totaux.depenses, recalcul(opsCategorie), reason: '$etape : recalcul categorie $c');
+        var rembCategorie = 0.0;
+        for (final e in entites) {
+          rembCategorie += await rembourse(e.id!);
+        }
+        final soldeCategorie = totaux.revenus - totaux.depenses + totaux.remboursements;
+        expect(soldeCategorie, sommeBoutiques, reason: '$etape : total categorie $c');
+        expect(soldeCategorie, recalcul(opsCategorie) + rembCategorie, reason: '$etape : recalcul categorie $c');
         // 3. Aucune operation d'une autre categorie (devises jamais melangees).
         final idsEntites = entites.map((e) => e.id).toSet();
         expect(opsCategorie.every((o) => idsEntites.contains(o.entiteId)), isTrue, reason: '$etape : devises melangees');
@@ -1284,6 +1308,20 @@ void main() {
     await operation(kaloum, revenu, 80000, jour: 4);
     await operation(taxi, revenu, 1000000, jour: 5);
     await verifier('operations de depart');
+
+    // Dette liee a une boutique : ses remboursements entrent dans son solde.
+    final detteMadina = await db.insererDette(Dette(
+        nomPersonne: 'Client Madina', montantInitial: 90000, date: DateTime(2026, 9, 6),
+        lienType: AppConstants.detteLienCategorieEntite, lienId: madina));
+    await db.insererRemboursement(DetteRemboursement(detteId: detteMadina, montant: 40000, date: DateTime(2026, 9, 10)));
+    await db.insererRemboursement(DetteRemboursement(detteId: detteMadina, montant: 20000, date: DateTime(2026, 9, 12)));
+    final detteTaxi = await db.insererDette(Dette(
+        nomPersonne: 'Client Taxi', montantInitial: 50000, date: DateTime(2026, 9, 6),
+        lienType: AppConstants.detteLienCategorieEntite, lienId: taxi));
+    await db.insererRemboursement(DetteRemboursement(detteId: detteTaxi, montant: 15000, date: DateTime(2026, 9, 11)));
+    await verifier('remboursements de dettes liees aux boutiques');
+    expect((await db.totauxCategorie(boutiques)).remboursements, 60000);
+    expect((await db.soldesParPersonne(madina))[null], 500000 + 60000, reason: 'au compte du proprietaire');
 
     final aModifier = (await db.listerTransactionsEntite(madina)).firstWhere((o) => o.gerantId == ibrahim);
     await db.modifierTransactionCategorie(CategorieTransaction(
@@ -1324,7 +1362,8 @@ void main() {
     for (final c in await db.listerCategoriesActivite()) {
       final entites = await db.listerEntitesCategorie(c.id!);
       for (final e in entites) {
-        expect(await db.soldeEntiteCategorie(e.id!), recalcul(await db.listerTransactionsEntite(e.id!)));
+        expect(await db.soldeEntiteCategorie(e.id!),
+            recalcul(await db.listerTransactionsEntite(e.id!)) + await rembourse(e.id!));
       }
     }
   });

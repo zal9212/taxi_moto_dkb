@@ -1240,6 +1240,12 @@ class ExcelService {
 
     final db = DatabaseService.instance;
 
+    // Les entites sont recreees (nouveaux numeros) : leurs dettes sont
+    // reliees a nouveau par le nom, sinon leurs remboursements sortiraient
+    // du solde des boutiques.
+    final liensDettes = remplacementComplet
+        ? await db.liensDettesEntites(categorieId: categorieId)
+        : <int, ({String categorie, String entite})>{};
     if (remplacementComplet) {
       await db.viderDonneesCategorie(categorieId);
     }
@@ -1368,6 +1374,8 @@ class ExcelService {
         }
       }
     }
+
+    await db.relierDettesAuxEntites(liensDettes);
 
     return rapport;
   }

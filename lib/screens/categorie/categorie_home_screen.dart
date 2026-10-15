@@ -32,6 +32,8 @@ class _CategorieHomeScreenState extends State<CategorieHomeScreen> {
   final Map<int, double> _soldeParEntite = {};
   double _totalRevenus = 0;
   double _totalDepenses = 0;
+  /// Remboursements des dettes liees aux entites : comptent dans le solde.
+  double _totalRemboursements = 0;
   bool _chargement = true;
 
   @override
@@ -67,6 +69,7 @@ class _CategorieHomeScreenState extends State<CategorieHomeScreen> {
       _entites = entites;
       _totalRevenus = totaux.revenus;
       _totalDepenses = totaux.depenses;
+      _totalRemboursements = totaux.remboursements;
       _chargement = false;
     });
   }
@@ -117,7 +120,8 @@ class _CategorieHomeScreenState extends State<CategorieHomeScreen> {
   }
 
   Widget _pageAccueil(Color couleur, String devise) {
-    final solde = _totalRevenus - _totalDepenses;
+    // = somme des soldes des entites (memes remboursements).
+    final solde = _totalRevenus - _totalDepenses + _totalRemboursements;
     return RefreshIndicator(
       onRefresh: _charger,
       child: ListView(
