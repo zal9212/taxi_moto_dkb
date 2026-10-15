@@ -189,7 +189,8 @@ class _DetteDetailScreenState extends State<DetteDetailScreen> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Supprimer cette dette ?'),
-        content: const Text('Cette dette et tous ses remboursements seront definitivement supprimes.'),
+        content: const Text('Cette dette sera definitivement supprimee. Une dette venant d\'une echeance : '
+            'l\'echeance redevient due et ses remboursements deviennent ses paiements.'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Annuler')),
           TextButton(
@@ -201,7 +202,13 @@ class _DetteDetailScreenState extends State<DetteDetailScreen> {
       ),
     );
     if (confirme != true) return;
-    await _db.supprimerDette(widget.detteId);
+    try {
+      await _db.supprimerDette(widget.detteId);
+    } on StateError catch (e) {
+      // Argent deja recu : il ne disparait pas en silence.
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+      return;
+    }
     if (!mounted) return;
     Navigator.pop(context);
   }

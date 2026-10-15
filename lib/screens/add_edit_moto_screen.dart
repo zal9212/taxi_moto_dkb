@@ -120,7 +120,7 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Annuler ce changement ?'),
-        content: Text('Le passage a ${c.montant.toStringAsFixed(0)} du ${formaterDate(c.depuis)} sera annule '
+        content: Text('Le passage a ${formaterNombre(c.montant)} du ${formaterDate(c.depuis)} sera annule '
             'tout de suite : ses echeances reprennent le montant d\'avant et le solde sera recalcule.'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Garder')),
@@ -226,7 +226,7 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
         }
         if (montantChange) {
           final suivant = _changementApres(_montantDepuis);
-          messages.add('Le versement passe a ${montantVersement.toStringAsFixed(0)} a partir du '
+          messages.add('Le versement passe a ${formaterNombre(montantVersement)} a partir du '
               '${formaterDate(_montantDepuis)}'
               '${suivant == null ? '' : ', jusqu\'au ${formaterDate(suivant.depuis)} (changement deja prevu)'}. '
               'Les echeances de cette periode prennent ce montant, meme celles deja passees ou payees : '
@@ -357,13 +357,13 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
               if (_changements.isNotEmpty) ...[
                 const SizedBox(height: 8),
                 const Text('Changements de montant', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
-                Text('Depart : ${widget.motoExistante!.montantVersement.toStringAsFixed(0)}',
+                Text('Depart : ${formaterNombre(widget.motoExistante!.montantVersement)}',
                     style: TextStyle(color: AppColors.texteGris, fontSize: 12)),
                 for (final c in _changements)
                   ListTile(
                     dense: true,
                     contentPadding: EdgeInsets.zero,
-                    title: Text('A partir du ${formaterDate(c.depuis)} : ${c.montant.toStringAsFixed(0)}'
+                    title: Text('A partir du ${formaterDate(c.depuis)} : ${formaterNombre(c.montant)}'
                         '${c.depuis.isAfter(ScheduleService.aujourdHui()) ? ' (prevu)' : ''}'),
                     trailing: IconButton(
                       icon: const Icon(Icons.delete_outline, size: 20),

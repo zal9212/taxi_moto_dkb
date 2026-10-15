@@ -408,7 +408,8 @@ class _CategorieEntiteDetailScreenState extends State<CategorieEntiteDetailScree
   }
 
   Widget _ligneDette(Dette d, String devise) {
-    final solde = _soldeParDette[d.id] ?? d.montantInitial;
+    // Jamais negatif a l'ecran : une dette trop remboursee est soldee.
+    final solde = (_soldeParDette[d.id] ?? d.montantInitial).clamp(0, double.infinity).toDouble();
     return InkWell(
       onTap: () async {
         await Navigator.push(context, MaterialPageRoute(builder: (_) => DetteDetailScreen(detteId: d.id!)));

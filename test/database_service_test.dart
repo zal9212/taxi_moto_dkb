@@ -216,7 +216,7 @@ void main() {
     test('l\'historique suit l\'export Excel et revient a l\'import ; supprime avec la moto', () async {
       final motoId = await nouvelleMoto();
       await db.changerMontant(motoId, 60000, DateTime(2026, 9, 14));
-      await db.changerMontant(motoId, 65000.5, DateTime(2027, 1, 1));
+      await db.changerMontant(motoId, 65000, DateTime(2027, 1, 1));
       final dossier = await Directory.systemTemp.createTemp('montants_test');
       addTearDown(() => dossier.delete(recursive: true));
       final chemin = '${dossier.path}/export.xlsx';
@@ -229,7 +229,7 @@ void main() {
       expect(importee.montantVersement, 50000);
       expect(await db.listerChangementsMontant(importee.id!), [
         (depuis: DateTime(2026, 9, 14), montant: 60000.0),
-        (depuis: DateTime(2027, 1, 1), montant: 65000.5),
+        (depuis: DateTime(2027, 1, 1), montant: 65000.0),
       ]);
 
       await db.supprimerMoto(importee.id!);
@@ -1051,6 +1051,119 @@ void main() {
       expect(v.statut, AppConstants.versementEnDette);
       expect((await db.listerDettes()).map((d) => d.id), contains(v.detteId));
       expect((await db.compteMoto(motoId: moto.id!)).retard, 0);
+    });
+  });
+
+  group('audit, verification : chaque chiffre a une seule source', () {
+    Future<int> echeanceDe(int motoId, DateTime date, {double paye = 0, String? statut}) => db.insererVersement(Versement(
+          motoId: motoId,
+          dateEcheance: date,
+          dateValidation: paye > 0 ? date : null,
+          montantPrevu: 50000,
+          montantPaye: paye > 0 ? paye : null,
+          statut: statut ?? (paye > 0 ? AppConstants.versementPaye : AppConstants.versementEnRetard),
+        ));
+    Future<Versement> ligne(int motoId, DateTime date) async =>
+        (await db.listerVersementsParMoto(motoId)).singleWhere((v) => v.dateEcheance == date);
+    Future<Moto> motoDe(String nom, String chauffeur) async => (await db.obtenirMoto(await db.insererMoto(Moto(
+          nom: nom,
+          chauffeur: chauffeur,
+          montantVersement: 50000,
+          frequenceType: AppConstants.freqHebdomadaire,
+          frequenceValeur: DateTime.monday,
+          dateDebut: DateTime(2026, 9, 7),
+        ))))!;
+
+    test('import : chaque semaine retrouve SA dette (deux motos, meme date, meme montant)', () async {
+      final a = await motoDe('Moto A', 'Alpha');
+      final b = await motoDe('Moto B', 'Bah');
+      await echeanceDe(a.id!, DateTime(2026, 9, 14));
+      await echeanceDe(b.id!, DateTime(2026, 9, 14));
+      // La dette de B est creee en premier : un lien "meme date + meme montant" la donnerait a A.
+      final detteB = await db.marquerEnDette(await ligne(b.id!, DateTime(2026, 9, 14)), b);
+      final detteA = await db.marquerEnDette(await ligne(a.id!, DateTime(2026, 9, 14)), a);
+      await db.insererRemboursement(DetteRemboursement(detteId: detteB, montant: 20000, date: DateTime(2026, 9, 20)));
+      final dossier = await Directory.systemTemp.createTemp('liens_test');
+      addTearDown(() => dossier.delete(recursive: true));
+      final chemin = '${dossier.path}/export.xlsx';
+      await File(chemin).writeAsBytes(await ExcelService.classeurComplet());
+
+      await ExcelService.importerDettes(chemin, remplacementComplet: true);
+
+      final dettes = {for (final d in await db.listerDettes()) d.id: d};
+      final va = await ligne(a.id!, DateTime(2026, 9, 14));
+      final vb = await ligne(b.id!, DateTime(2026, 9, 14));
+      expect(dettes[va.detteId]!.nomPersonne, 'Alpha');
+      expect(dettes[vb.detteId]!.nomPersonne, 'Bah');
+      expect(await db.totalEncaisse(motoId: b.id!), 20000);
+      expect(await db.totalEncaisse(motoId: a.id!), 0);
+      expect(detteA, isNot(detteB));
+    });
+
+    test('import : une dette absente du fichier rend ses remboursements a l\'echeance (rien ne disparait)', () async {
+      final moto = await motoDe('Moto A', 'Alpha');
+      await echeanceDe(moto.id!, DateTime(2026, 9, 14));
+      final dossier = await Directory.systemTemp.createTemp('liens_test');
+      addTearDown(() => dossier.delete(recursive: true));
+      final chemin = '${dossier.path}/export.xlsx';
+      // Fichier exporte AVANT la dette : elle n'y figure pas.
+      await File(chemin).writeAsBytes(await ExcelService.classeurComplet());
+      final detteId = await db.marquerEnDette(await ligne(moto.id!, DateTime(2026, 9, 14)), moto);
+      await db.insererRemboursement(DetteRemboursement(detteId: detteId, montant: 30000, date: DateTime(2026, 9, 20)));
+
+      await ExcelService.importerDettes(chemin, remplacementComplet: true);
+
+      final v = await ligne(moto.id!, DateTime(2026, 9, 14));
+      expect((v.statut, v.montantPaye), (AppConstants.versementPaye, 30000));
+      expect(await db.totalEncaisse(motoId: moto.id!), 30000);
+    });
+
+    test('mensuel : deux echeances a venir vides dans le meme mois sont fusionnees, le passe ne l\'est jamais', () async {
+      var moto = await motoDe('Moto A', 'Alpha');
+      moto = moto.copyWith(frequenceType: AppConstants.freqMensuelle, frequenceValeur: 15);
+      await db.modifierMoto(moto);
+      final aujourdHui = ScheduleService.aujourdHui();
+      final moisProchain = DateTime(aujourdHui.year, aujourdHui.month + 1, 1);
+      await echeanceDe(moto.id!, DateTime(2026, 9, 7)); // passe, semaine 1
+      await echeanceDe(moto.id!, DateTime(2026, 9, 21)); // passe, semaine 3 du meme mois : garde
+      await echeanceDe(moto.id!, moisProchain, statut: AppConstants.versementEnAttente);
+      await echeanceDe(moto.id!, DateTime(moisProchain.year, moisProchain.month, 15), statut: AppConstants.versementEnAttente);
+
+      await db.normaliser(moto.id!);
+
+      final dates = (await db.listerVersementsParMoto(moto.id!)).map((v) => v.dateEcheance).toList();
+      expect(dates, containsAll([DateTime(2026, 9, 7), DateTime(2026, 9, 21), moisProchain]));
+      expect(dates.where((d) => d.year == moisProchain.year && d.month == moisProchain.month).length, 1);
+    });
+
+    test('une echeance deja soldee ne passe pas en dette (pas de dette a 0)', () async {
+      final moto = await motoDe('Moto A', 'Alpha');
+      await echeanceDe(moto.id!, DateTime(2026, 9, 14), paye: 50000);
+
+      await expectLater(
+          db.marquerEnDette(await ligne(moto.id!, DateTime(2026, 9, 14)), moto), throwsArgumentError);
+      expect(await db.listerDettes(), isEmpty);
+    });
+
+    test('supprimer une dette deja remboursee est refuse (l\'argent recu ne disparait pas)', () async {
+      final moto = await motoDe('Moto A', 'Alpha');
+      final detteId = await nouvelleDette(lienType: AppConstants.detteLienMoto, lienId: moto.id);
+      await db.insererRemboursement(DetteRemboursement(detteId: detteId, montant: 30000, date: DateTime(2026, 9, 20)));
+
+      await expectLater(db.supprimerDette(detteId), throwsStateError);
+      expect(await db.totalEncaisse(motoId: moto.id!), 30000);
+    });
+
+    test('ancienne echeance "payee" sans montant : comptee dans le journal (encaisse = ce que la fiche considere paye)', () async {
+      await ancienneBase(6, sql: [
+        ...tablesV3,
+        "INSERT INTO versements (moto_id, date_echeance, date_validation, montant_prevu, montant_paye, statut) "
+            "VALUES (1, '2026-09-07T00:00:00.000', '2026-09-08T10:00:00.000', 50000, NULL, 'paye')",
+      ]);
+
+      final paiements = await db.listerPaiementsRecents();
+
+      expect(paiements.map((p) => (p.montant, p.date)), [(50000, DateTime(2026, 9, 8, 10))]);
     });
   });
 

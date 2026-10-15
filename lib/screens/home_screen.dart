@@ -173,7 +173,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _motos = motos;
       _totalEncaisse = totalEncaisse;
       _totalEnRetard = comptes.values.fold(0.0, (total, c) => total + c.retard);
-      _motosAJour = comptes.values.where((c) => c.retard == 0).length;
+      // "A jour" : parmi les motos en service.
+      _motosAJour = motos
+          .where((m) => m.statut == AppConstants.motoActive && (comptes[m.id]?.retard ?? 0) == 0)
+          .length;
       _activites = activites.take(10).toList();
       _infosMotos = infosMotos;
     });

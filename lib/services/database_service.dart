@@ -277,6 +277,23 @@ class DatabaseService {
       // changement, le montant de la moto s'applique partout comme avant.
       await _creerTableMontantsMoto(db);
     }
+
+    if (oldVersion < 10) {
+      // v10 : une echeance "payee" sans montant (ancien import) compte comme
+      // payee en entier dans le retard ; elle entre aussi dans le journal, sinon
+      // le total encaisse et les statistiques l'oubliaient.
+      final tables =
+          (await db.rawQuery("SELECT name FROM sqlite_master WHERE type = 'table'")).map((t) => t['name']).toSet();
+      if (tables.containsAll(['versements', 'paiements'])) {
+        await db.execute(
+          'INSERT INTO paiements (versement_id, moto_id, montant, date) '
+          'SELECT id, moto_id, montant_prevu, COALESCE(date_validation, date_echeance) FROM versements '
+          "WHERE statut = 'paye' AND montant_paye IS NULL AND id NOT IN (SELECT versement_id FROM paiements)",
+        );
+        await db.execute(
+            "UPDATE versements SET montant_paye = montant_prevu WHERE statut = 'paye' AND montant_paye IS NULL");
+      }
+    }
   }
 
   /// Gerants d'une entite et notes vocales des operations (crees dans
@@ -494,7 +511,7 @@ class DatabaseService {
     });
   }
 
-  Future<void> insererVersements(List<Versement> versements) async {
+  Future<void> _insererVersements(List<Versement> versements) async {
     final db = await database;
     final batch = db.batch();
     for (final v in versements) {
@@ -523,31 +540,39 @@ class DatabaseService {
     return maps.isEmpty ? null : Versement.fromMap(maps.first);
   }
 
-  /// Rattache une echeance "en dette" a sa dette (import). Sans [detteId]
-  /// connu, on cherche la meme dette par correspondance exacte (meme moto ou
-  /// sans lien, meme date, meme montant, reliee a aucune autre echeance).
-  /// Sinon elle redevient un retard : jamais comptee a la fois en retard et
-  /// dans Dettes, jamais perdue.
-  Future<void> lierVersementADette(int versementId, int? detteId) async {
+  /// Rattache une echeance "en dette" a sa dette (import). La dette doit
+  /// etre la sienne : meme chauffeur, meme date, meme montant restant, liee a
+  /// cette moto ou a rien, et a aucune autre echeance — un [detteId] venant
+  /// d'un fichier est verifie de la meme facon (un autre telephone a d'autres
+  /// numeros). Sans dette retrouvee, l'echeance redevient due : jamais
+  /// comptee a la fois en retard et dans Dettes. Retourne true si reliee.
+  Future<bool> lierVersementADette(int versementId, int? detteId) async {
     final db = await database;
     final v = Versement.fromMap((await db.query('versements', where: 'id = ?', whereArgs: [versementId])).first);
-    var id = detteId;
-    if (id == null) {
+    final moto = await obtenirMoto(v.motoId);
+    int? id;
+    if (moto != null) {
       final candidates = await db.rawQuery(
-        'SELECT id FROM dettes WHERE date = ? AND montant_initial = ? '
+        'SELECT id FROM dettes WHERE nom_personne = ? AND date = ? AND montant_initial = ? '
         'AND (lien_type IS NULL OR (lien_type = ? AND lien_id = ?)) '
-        'AND id NOT IN (SELECT dette_id FROM versements WHERE dette_id IS NOT NULL) LIMIT 1',
+        'AND id NOT IN (SELECT dette_id FROM versements WHERE dette_id IS NOT NULL AND id != ?) '
+        '${detteId != null ? 'AND id = ? ' : ''}ORDER BY id LIMIT 1',
         [
+          moto.chauffeur,
           v.dateEcheance.toIso8601String(),
           v.montantPrevu - (v.montantPaye ?? 0),
           AppConstants.detteLienMoto,
           v.motoId,
+          versementId,
+          if (detteId != null) detteId,
         ],
       );
       if (candidates.isNotEmpty) {
         id = candidates.first['id'] as int;
         await db.update('dettes', {'lien_type': AppConstants.detteLienMoto, 'lien_id': v.motoId},
             where: 'id = ?', whereArgs: [id]);
+      } else if (detteId != null) {
+        return lierVersementADette(versementId, null); // ID d'un autre telephone : on cherche la sienne
       }
     }
     await db.update(
@@ -558,7 +583,38 @@ class DatabaseService {
       where: 'id = ?',
       whereArgs: [versementId],
     );
+    return id != null;
   }
+
+  /// Remboursements de chaque dette nee d'une echeance (id de l'echeance ->
+  /// sommes recues, avec leur date) : a garder avant un import qui remplace
+  /// les dettes.
+  Future<Map<int, List<({double montant, String date})>>> remboursementsDesEcheances() async {
+    final db = await database;
+    final lignes = await db.rawQuery(
+      'SELECT v.id AS versement_id, r.montant, r.date FROM versements v '
+      'JOIN dette_remboursements r ON r.dette_id = v.dette_id WHERE v.dette_id IS NOT NULL',
+    );
+    final resultat = <int, List<({double montant, String date})>>{};
+    for (final l in lignes) {
+      resultat
+          .putIfAbsent(l['versement_id'] as int, () => [])
+          .add((montant: (l['montant'] as num).toDouble(), date: l['date'] as String));
+    }
+    return resultat;
+  }
+
+  /// Une echeance qui ne retrouve pas sa dette apres un import : les sommes
+  /// deja recues sur cette dette deviennent ses paiements, a leur date.
+  Future<void> rendreRemboursementsAEcheance(int versementId, List<({double montant, String date})> argent) =>
+      _enFile(() async {
+        final db = await database;
+        final maps = await db.query('versements', where: 'id = ?', whereArgs: [versementId]);
+        if (maps.isEmpty) return;
+        final v = Versement.fromMap(maps.first);
+        await db.transaction((txn) => _rendreEcheanceDue(txn, v, argent: argent));
+        await _normaliser(v.motoId);
+      });
 
   /// Dette nee d'une echeance de moto ("Marquer en dette") : son lien et son
   /// montant viennent de l'echeance et ne se modifient pas a la main.
@@ -952,7 +1008,7 @@ class DatabaseService {
       valeur: moto.frequenceValeur,
       aujourdHui: ScheduleService.aujourdHui(),
     );
-    if (dates.isNotEmpty) await insererVersements(await _nouvellesEcheances(moto, dates));
+    if (dates.isNotEmpty) await _insererVersements(await _nouvellesEcheances(moto, dates));
     return dates.length;
   }
 
@@ -983,7 +1039,8 @@ class DatabaseService {
   Future<List<ChangementMontant>> _changementsMontant(DatabaseExecutor db, int motoId) async {
     final lignes = await db.query('montants_moto', where: 'moto_id = ?', whereArgs: [motoId], orderBy: 'depuis ASC');
     return [
-      for (final l in lignes) (depuis: DateTime.parse(l['depuis'] as String), montant: (l['montant'] as num).toDouble()),
+      for (final l in lignes)
+        (depuis: DateTime.parse(l['depuis'] as String), montant: (l['montant'] as num).toDouble()),
     ];
   }
 
@@ -1138,7 +1195,8 @@ class DatabaseService {
         final maintenant = DateTime.now();
         for (final a in affectations) {
           final existante = existants
-              .where((v) => ScheduleService.dateSeule(v.dateEcheance) == a.date && v.statut != AppConstants.versementEnDette)
+              .where((v) =>
+                  ScheduleService.dateSeule(v.dateEcheance) == a.date && v.statut != AppConstants.versementEnDette)
               .firstOrNull;
           final id = existante?.id ??
               await insererVersement(ScheduleService.nouvelleEcheance(moto, changements, a.date, aujourdHui));
@@ -1166,6 +1224,9 @@ class DatabaseService {
     return db.transaction((txn) async {
       final v = Versement.fromMap((await txn.query('versements', where: 'id = ?', whereArgs: [echeance.id])).first);
       if (v.statut == AppConstants.versementEnDette && v.detteId != null) return v.detteId!;
+      if (ScheduleService.resteDu(v) <= 0) {
+        throw ArgumentError('Cette echeance est deja soldee : rien a mettre en dette.');
+      }
       final detteId = await txn.insert(
         'dettes',
         Dette(
@@ -1214,9 +1275,10 @@ class DatabaseService {
     if (moto == null) return;
     final db = await database;
     await db.transaction((txn) async {
-      final lignes = (await txn.query('versements', where: 'moto_id = ?', whereArgs: [motoId], orderBy: 'date_echeance ASC'))
-          .map(Versement.fromMap)
-          .toList();
+      final lignes =
+          (await txn.query('versements', where: 'moto_id = ?', whereArgs: [motoId], orderBy: 'date_echeance ASC'))
+              .map(Versement.fromMap)
+              .toList();
       final aReporter = <({DateTime depuis, List<({DateTime date, double montant})> argent})>[];
 
       // 1. Un seul versement par periode. "Tous les N jours" : l'historique
@@ -1224,9 +1286,18 @@ class DatabaseService {
       if (moto.frequenceType != AppConstants.freqPersonnalisee) {
         Versement? gardee;
         for (final v in [...lignes]) {
+          // Semaine du calendrier pour tout l'historique ; en mensuel, une
+          // echeance a venir encore vide dans un mois deja pris est aussi en trop
+          // (le passe, lui, a pu suivre un rythme hebdomadaire : jamais fusionne au mois).
+          final aVenirVide = !v.dateEcheance.isBefore(ScheduleService.aujourdHui()) &&
+              v.statut == AppConstants.versementEnAttente &&
+              ScheduleService.montantPaye(v) == 0;
           final doublon = gardee != null &&
-              ScheduleService.memePeriode(gardee.dateEcheance, v.dateEcheance,
-                  type: AppConstants.freqHebdomadaire, valeur: DateTime.monday);
+              (ScheduleService.memePeriode(gardee.dateEcheance, v.dateEcheance,
+                      type: AppConstants.freqHebdomadaire, valeur: DateTime.monday) ||
+                  (aVenirVide &&
+                      ScheduleService.memePeriode(gardee.dateEcheance, v.dateEcheance,
+                          type: moto.frequenceType, valeur: moto.frequenceValeur)));
           if (!doublon) {
             gardee = v;
           } else if (v.statut == AppConstants.versementEnDette) {
@@ -1354,7 +1425,8 @@ class DatabaseService {
     final sources = [...argent];
     for (final a in affectations) {
       final existante = existants
-          .where((v) => ScheduleService.dateSeule(v.dateEcheance) == a.date && v.statut != AppConstants.versementEnDette)
+          .where(
+              (v) => ScheduleService.dateSeule(v.dateEcheance) == a.date && v.statut != AppConstants.versementEnDette)
           .firstOrNull;
       final id = existante?.id ??
           await txn.insert(
@@ -1365,7 +1437,8 @@ class DatabaseService {
       while (aPayer > 0 && sources.isNotEmpty) {
         final s = sources.first;
         final part = s.montant <= aPayer ? s.montant : aPayer;
-        await txn.insert('paiements', {'versement_id': id, 'moto_id': moto.id, 'montant': part, 'date': s.date.toIso8601String()});
+        await txn.insert(
+            'paiements', {'versement_id': id, 'moto_id': moto.id, 'montant': part, 'date': s.date.toIso8601String()});
         final ligne = Versement.fromMap((await txn.query('versements', where: 'id = ?', whereArgs: [id])).first);
         await txn.update(
           'versements',
@@ -1897,12 +1970,19 @@ class DatabaseService {
         final db = await database;
         final motoIds = <int>{};
         await db.transaction((txn) async {
-          final echeances = (await txn.query('versements', where: 'dette_id = ?', whereArgs: [id]))
-              .map(Versement.fromMap)
-              .toList();
+          final echeances =
+              (await txn.query('versements', where: 'dette_id = ?', whereArgs: [id])).map(Versement.fromMap).toList();
+          final argent = [
+            for (final r in await txn.query('dette_remboursements', where: 'dette_id = ?', whereArgs: [id]))
+              (montant: (r['montant'] as num).toDouble(), date: r['date'] as String),
+          ];
+          // Dette ajoutee a la main : l'argent recu ne disparait pas en silence.
+          if (echeances.isEmpty && argent.isNotEmpty) {
+            throw StateError('Cette dette a deja recu des remboursements : supprimez-les d\'abord.');
+          }
           for (final v in echeances) {
             motoIds.add(v.motoId);
-            await _rendreEcheanceDue(txn, v, detteId: id);
+            await _rendreEcheanceDue(txn, v, argent: argent);
           }
           await txn.delete('dette_remboursements', where: 'dette_id = ?', whereArgs: [id]);
           await txn.delete('dettes', where: 'id = ?', whereArgs: [id]);
@@ -1912,15 +1992,15 @@ class DatabaseService {
         }
       });
 
-  /// Echeance qui sort de sa dette [detteId] : elle redevient due, et les
-  /// remboursements de la dette deviennent ses paiements, a leur date.
-  Future<void> _rendreEcheanceDue(Transaction txn, Versement v, {required int detteId}) async {
-    final remboursements = await txn.query('dette_remboursements', where: 'dette_id = ?', whereArgs: [detteId]);
+  /// Echeance qui sort de sa dette : elle redevient due, et l'[argent] deja
+  /// recu sur la dette devient ses paiements, a leur date.
+  Future<void> _rendreEcheanceDue(Transaction txn, Versement v,
+      {required List<({double montant, String date})> argent}) async {
     var paye = v.montantPaye ?? 0;
     String? derniereDate;
-    for (final r in remboursements) {
-      final montant = (r['montant'] as num).toDouble();
-      final date = r['date'] as String;
+    for (final r in argent) {
+      final montant = r.montant;
+      final date = r.date;
       await txn.insert('paiements', {'versement_id': v.id, 'moto_id': v.motoId, 'montant': montant, 'date': date});
       paye += montant;
       if (derniereDate == null || date.compareTo(derniereDate) > 0) derniereDate = date;
@@ -1959,7 +2039,8 @@ class DatabaseService {
   /// supprimees ([filtreLienId] : condition SQL sur lien_id, sinon toutes) :
   /// elles gardent la devise de leur categorie. A appeler AVANT de supprimer
   /// les entites, pour que la devise de la categorie soit encore lisible.
-  Future<void> _detacherDettesEntites(DatabaseExecutor ex, {String filtreLienId = '', List<Object?> args = const []}) async {
+  Future<void> _detacherDettesEntites(DatabaseExecutor ex,
+      {String filtreLienId = '', List<Object?> args = const []}) async {
     await ex.rawUpdate(
       'UPDATE dettes SET devise_symbole = COALESCE((SELECT c.devise_symbole FROM categorie_entites e '
       'JOIN categories_activite c ON c.id = e.categorie_id WHERE e.id = dettes.lien_id), devise_symbole), '
@@ -2027,7 +2108,8 @@ class DatabaseService {
 
   Future<List<DetteRemboursement>> listerRemboursements(int detteId) async {
     final db = await database;
-    final maps = await db.query('dette_remboursements', where: 'dette_id = ?', whereArgs: [detteId], orderBy: 'date DESC');
+    final maps =
+        await db.query('dette_remboursements', where: 'dette_id = ?', whereArgs: [detteId], orderBy: 'date DESC');
     return maps.map((m) => DetteRemboursement.fromMap(m)).toList();
   }
 
@@ -2107,7 +2189,10 @@ class DatabaseService {
   /// Devise effective de plusieurs dettes en 2 requetes au total.
   Future<Map<int, String>> devisesEffectivesDettes(List<Dette> dettes) async {
     final devise = await _resolveurDeviseDette();
-    return {for (final d in dettes) if (d.id != null) d.id!: devise(d)};
+    return {
+      for (final d in dettes)
+        if (d.id != null) d.id!: devise(d)
+    };
   }
 
   /// Regle unique de la devise d'une dette : celle de la moto ou de l'entite

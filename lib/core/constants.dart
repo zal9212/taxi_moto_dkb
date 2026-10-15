@@ -7,7 +7,7 @@ class AppConstants {
   AppConstants._();
 
   static const String dbName = 'moto_taxi_douka.db';
-  static const int dbVersion = 9;
+  static const int dbVersion = 10;
 
   // Valeurs par défaut au premier lancement (modifiables ensuite)
   static const String devisePardDefaut = 'FG';

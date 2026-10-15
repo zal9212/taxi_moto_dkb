@@ -65,6 +65,7 @@ class NotificationService {
       'Versement a venir - ${moto.nom}',
       'Echeance de $montant prevue le ${formaterDate(d)}',
       d.subtract(Duration(hours: delaiHeures)),
+      _payload(moto),
     );
     await _programmer(
       versement.id! + _decalageAlerteRetard,
@@ -72,10 +73,11 @@ class NotificationService {
       '${moto.chauffeur} n\'a pas encore paye l\'echeance du ${formaterDate(d)} ($montant). '
           'Pensez a relancer.',
       DateTime(d.year, d.month, d.day + 1, 9),
+      _payload(moto),
     );
   }
 
-  static Future<void> _programmer(int id, String titre, String texte, DateTime quand) async {
+  static Future<void> _programmer(int id, String titre, String texte, DateTime quand, String payload) async {
     if (quand.isBefore(DateTime.now())) return; // déjà passé, on ignore
     const details = NotificationDetails(
       android: AndroidNotificationDetails(
@@ -98,6 +100,7 @@ class NotificationService {
       // quelques minutes de decalage, ce qui est sans consequence ici.
       androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
       uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
+      payload: payload,
     );
   }
 
@@ -115,21 +118,30 @@ class NotificationService {
     required List<Versement> versements,
     required int delaiHeures,
   }) async {
-    // Une echeance passee en dette se suit dans Dettes : plus de rappel.
-    final nonPayes = versements.where(
-        (v) => v.statut != AppConstants.versementPaye && v.statut != AppConstants.versementEnDette);
-
-    if (moto.statut != AppConstants.motoActive) {
-      for (final v in nonPayes) {
-        if (v.id != null) await annulerRappel(v.id!);
-      }
-      return;
+    // Seule une echeance avec un reste a payer (hors dette, moto active) a un
+    // rappel : une semaine payee - meme par de l'argent deplace vers elle -,
+    // en dette, ou supprimee (doublon, avance regroupee) n'en a plus.
+    final aRappeler = moto.statut != AppConstants.motoActive
+        ? <Versement>[]
+        : versements
+            .where((v) => v.id != null && v.statut != AppConstants.versementEnDette && ScheduleService.resteDu(v) > 0)
+            .toList();
+    final gardes = aRappeler.map((v) => v.id!).toSet();
+    for (final v in versements) {
+      if (v.id != null && !gardes.contains(v.id)) await annulerRappel(v.id!);
     }
-
-    for (final v in nonPayes) {
+    for (final p in await _plugin.pendingNotificationRequests()) {
+      if (p.payload != _payload(moto)) continue;
+      final echeance = p.id >= _decalageAlerteRetard ? p.id - _decalageAlerteRetard : p.id;
+      if (!gardes.contains(echeance)) await _plugin.cancel(p.id);
+    }
+    for (final v in aRappeler) {
       await planifierRappel(versement: v, moto: moto, delaiHeures: delaiHeures);
     }
   }
+
+  /// Rattache chaque rappel a sa moto (pour retrouver ceux d'echeances supprimees).
+  static String _payload(Moto moto) => 'moto:${moto.id}';
 
   /// Complète les échéances d'une moto active (fenêtre glissante) et
   /// resynchronise ses rappels — à chaque fois : un paiement, une dette ou

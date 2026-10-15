@@ -1382,6 +1382,7 @@ class ExcelService {
     // (par l'ID du fichier, sinon par correspondance exacte) : une semaine
     // n'est jamais a la fois en retard et dans Dettes.
     final liens = remplacementComplet ? await db.liensEcheancesDettes() : <int, int>{};
+    final argentDesEcheances = remplacementComplet ? await db.remboursementsDesEcheances() : const {};
     if (remplacementComplet) {
       await db.viderDettes();
     }
@@ -1524,7 +1525,10 @@ class ExcelService {
     }
 
     for (final lien in liens.entries) {
-      await db.lierVersementADette(lien.key, idDetteFichierVersDb[lien.value]);
+      final reliee = await db.lierVersementADette(lien.key, idDetteFichierVersDb[lien.value]);
+      // Dette absente du fichier : l'argent deja recu reste a l'echeance.
+      final argent = argentDesEcheances[lien.key];
+      if (!reliee && argent != null) await db.rendreRemboursementsAEcheance(lien.key, argent);
     }
     for (final motoId in motosIds) {
       await db.normaliser(motoId);
@@ -1670,14 +1674,14 @@ class ExcelService {
   static String _iso(DateTime d) => d.toIso8601String().substring(0, 10);
 
   /// Montant d'une cellule : d'abord la regle de saisie de l'app
-  /// ([lireMontant] : "10.000" ou "10 000" = 10 000, pas 10), sinon un
-  /// nombre (cellule numerique "50000.0", historique a decimales). Toujours
-  /// positif ; 0 seulement si [zeroAccepte] (ex : montant paye).
+  /// ([lireMontant] : "10.000" ou "10 000" = 10 000, pas 10), sinon une
+  /// cellule numerique ("50000.0"). Entier et positif, comme dans l'app
+  /// ("12.50" est refuse) ; 0 seulement si [zeroAccepte] (ex : montant paye).
   static double? _lireMontant(String? texte, {bool zeroAccepte = false}) {
     final t = texte?.trim();
     if (t == null || t.isEmpty) return null;
     final montant = lireMontant(t) ?? double.tryParse(t);
-    if (montant == null || montant.isNaN || montant.isInfinite) return null;
+    if (montant == null || montant.isNaN || montant.isInfinite || montant != montant.roundToDouble()) return null;
     return montant > 0 || (zeroAccepte && montant == 0) ? montant : null;
   }
 
