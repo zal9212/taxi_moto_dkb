@@ -1129,11 +1129,12 @@ class DatabaseService {
 
   /// [_assurerEcheances], et les echeances de la moto a jour (pour les
   /// rappels, sans les relire).
-  Future<({int crees, List<Versement> versements})> _assurerEtLister(Moto moto) async {
-    if (moto.id == null) return (crees: 0, versements: <Versement>[]);
+  Future<({int crees, List<Versement> versements, bool change})> _assurerEtLister(Moto moto) async {
+    if (moto.id == null) return (crees: 0, versements: <Versement>[], change: false);
     var existants = await listerVersementsParMoto(moto.id!); // tri date DESC
     // Une seule lecture quand le compte est deja en regle (presque toujours).
-    if (_normalisationNecessaire(moto, existants.reversed.toList())) {
+    final normalise = _normalisationNecessaire(moto, existants.reversed.toList());
+    if (normalise) {
       await _normaliser(moto.id!);
       existants = await listerVersementsParMoto(moto.id!);
     }
@@ -1150,14 +1151,17 @@ class DatabaseService {
       valeur: moto.frequenceValeur,
       aujourdHui: ScheduleService.aujourdHui(),
     );
-    if (dates.isEmpty) return (crees: 0, versements: existants);
+    if (dates.isEmpty) return (crees: 0, versements: existants, change: normalise);
     await _insererVersements(await _nouvellesEcheances(moto, dates));
-    return (crees: dates.length, versements: await listerVersementsParMoto(moto.id!));
+    return (crees: dates.length, versements: await listerVersementsParMoto(moto.id!), change: true);
   }
 
-  /// Complete les echeances d'une moto et retourne toutes ses echeances a jour.
-  Future<List<Versement>> assurerEcheancesEtLister(Moto moto) =>
-      _enFile(() async => (await _assurerEtLister(moto)).versements);
+  /// Complete les echeances d'une moto et retourne toutes ses echeances a
+  /// jour, et si quelque chose a change (l'ecran se rafraichit alors).
+  Future<({List<Versement> versements, bool change})> assurerEcheancesEtLister(Moto moto) => _enFile(() async {
+        final r = await _assurerEtLister(moto);
+        return (versements: r.versements, change: r.change);
+      });
 
   /// Applique une modification du plan d'une moto (date de début,
   /// fréquence ou jour) à ses échéances non payées — voir
@@ -1415,7 +1419,15 @@ class DatabaseService {
   ///    plus ancienne de cote, il faut d'abord passer celle-ci en dette.
   /// L'argent deplace garde sa date de paiement : le total encaisse et les
   /// statistiques par date ne changent pas.
-  Future<void> normaliser(int motoId) => _enFile(() => _normaliser(motoId));
+  /// true si quelque chose a ete corrige.
+  Future<bool> normaliser(int motoId) => _enFile(() async {
+        final moto = await obtenirMoto(motoId);
+        if (moto == null) return false;
+        final lignes = (await listerVersementsParMoto(motoId)).reversed.toList();
+        if (!_normalisationNecessaire(moto, lignes)) return false;
+        await _normaliser(motoId);
+        return true;
+      });
 
   Future<void> _normaliser(int motoId) async {
     final moto = await obtenirMoto(motoId);
@@ -2506,6 +2518,15 @@ class DatabaseService {
 
   /// Solde restant de chaque dette (montant initial moins ses
   /// remboursements), en une seule requete pour toutes les dettes.
+  /// Date du dernier remboursement de chaque dette (une lecture).
+  Future<Map<int, DateTime>> derniersRemboursements() async {
+    final db = await database;
+    return {
+      for (final l in await db.rawQuery('SELECT dette_id, MAX(date) AS d FROM dette_remboursements GROUP BY dette_id'))
+        l['dette_id'] as int: DateTime.parse(l['d'] as String),
+    };
+  }
+
   /// Seule formule du solde d'une dette ([detteId] : une seule).
   Future<Map<int, double>> soldesDettes({int? detteId}) async {
     final db = await database;

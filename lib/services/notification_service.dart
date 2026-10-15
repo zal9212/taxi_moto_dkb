@@ -174,11 +174,12 @@ class NotificationService {
   /// les échéances à rappeler, pas seulement leur création.
   /// [enAttente] / [delaiHeures] : lus une fois par l'ecran qui traite
   /// plusieurs motos (accueil), sinon lus ici.
-  static Future<void> assurerEcheancesEtRappels(Moto moto,
+  /// true si les echeances ont change (l'ecran se rafraichit alors).
+  static Future<bool> assurerEcheancesEtRappels(Moto moto,
       {List<PendingNotificationRequest>? enAttente, int? delaiHeures}) async {
     final db = DatabaseService.instance;
-    if (moto.id == null) return;
-    final versements = await db.assurerEcheancesEtLister(moto);
+    if (moto.id == null) return false;
+    final (:versements, :change) = await db.assurerEcheancesEtLister(moto);
     // Le rappel est secondaire : un echec du plugin de notifications ne
     // doit pas bloquer le chargement des ecrans qui appellent ceci.
     try {
@@ -189,6 +190,7 @@ class NotificationService {
         enAttente: enAttente,
       );
     } catch (_) {}
+    return change;
   }
 
   /// Reprogramme tous les rappels en attente — utile après un changement

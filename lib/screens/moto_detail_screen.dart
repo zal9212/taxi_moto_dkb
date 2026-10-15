@@ -45,7 +45,16 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     _charger();
   }
 
+  /// 1. Affichage immediat ; 2. entretien de fond (fenetre d'echeances,
+  /// rappels) juste apres, sans faire attendre l'ecran ; on ne relit que
+  /// s'il a change quelque chose.
   Future<void> _charger() async {
+    final moto = await _afficher();
+    if (moto == null || moto.statut != AppConstants.motoActive) return;
+    if (await NotificationService.assurerEcheancesEtRappels(moto) && mounted) await _afficher();
+  }
+
+  Future<Moto?> _afficher() async {
     // Roue plein ecran seulement au premier affichage : ensuite les chiffres
     // se mettent a jour sur place (la page reste visible, sans attente).
     final moto = await _db.obtenirMoto(widget.motoId);
@@ -54,13 +63,7 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
       // qui n'existe plus) : referme l'ecran au lieu de rester bloque en
       // chargement infini.
       if (mounted) Navigator.pop(context);
-      return;
-    }
-
-    // Maintient la fenetre d'echeances a venir pleine (versement recurrent
-    // et indefini, pas de montant total a atteindre).
-    if (moto.statut == AppConstants.motoActive) {
-      await NotificationService.assurerEcheancesEtRappels(moto);
+      return null;
     }
 
     final versements = await _db.listerVersementsParMoto(widget.motoId);
@@ -77,7 +80,7 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
       ..clear()
       ..addAll({for (final d in dettes) if (d.id != null) d.id!: soldes[d.id] ?? d.montantInitial});
 
-    if (!mounted) return;
+    if (!mounted) return null;
     setState(() {
       _moto = moto;
       _versements = versements;
@@ -89,6 +92,7 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
       _dettes = dettes;
       _chargement = false;
     });
+    return moto;
   }
 
 
@@ -507,6 +511,7 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
       compte: _compte,
       dettes: _dettes,
       detteDe: _detteDe,
+      derniersRemboursements: await _db.derniersRemboursements(),
     );
   }
 

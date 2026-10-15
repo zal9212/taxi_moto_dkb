@@ -103,27 +103,43 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }();
   }
 
+  /// 1. Affichage immediat (quelques lectures) ; 2. entretien de fond juste
+  /// apres, sans faire attendre l'ecran ; on ne rafraichit que s'il a change
+  /// quelque chose (ex : la nouvelle echeance de la semaine).
   Future<void> _chargerUneFois() async {
-    await _db.actualiserRetards();
+    await _afficher();
+    if (await _entretenir() && mounted) await _afficher();
+  }
 
-    final bornes = _bornesPeriode;
+  /// Entretien des echeances : statuts en retard, fenetre d'echeances a
+  /// venir, regles d'argent (normaliser), rappels. true si les echeances ont
+  /// change. (Le retard affiche se calcule sur les dates : le statut "en
+  /// retard" n'y change rien.)
+  Future<bool> _entretenir() async {
+    await _db.actualiserRetards();
     final params = await _db.obtenirParametres();
     final motos = await _db.listerMotos();
-
-    // Garde la fenetre d'echeances a venir pleine pour chaque moto active
-    // (versement recurrent et indefini) - toute modification (montant,
-    // frequence...) se repercute donc immediatement sur tout le reste.
+    var change = false;
     // Rappels deja programmes : lus une seule fois pour toutes les motos.
     final rappels = await NotificationService.rappelsEnAttente();
     for (final m in motos.where((m) => m.statut == AppConstants.motoActive)) {
-      await NotificationService.assurerEcheancesEtRappels(m,
-          enAttente: rappels, delaiHeures: params.delaiNotificationHeures);
+      if (await NotificationService.assurerEcheancesEtRappels(m,
+          enAttente: rappels, delaiHeures: params.delaiNotificationHeures)) {
+        change = true;
+      }
     }
     // Les motos hors service suivent les memes regles d'argent (doublons,
     // trop-payes) ; les actives le font dans assurerEcheances.
     for (final m in motos.where((m) => m.statut != AppConstants.motoActive && m.id != null)) {
-      await _db.normaliser(m.id!);
+      if (await _db.normaliser(m.id!)) change = true;
     }
+    return change;
+  }
+
+  Future<void> _afficher() async {
+    final bornes = _bornesPeriode;
+    final params = await _db.obtenirParametres();
+    final motos = await _db.listerMotos();
     final totalEncaisse = await _db.totalEncaisse(
       motoId: _motoFiltreId,
       debut: bornes.debut,

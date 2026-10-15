@@ -2,6 +2,8 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 
+import '../core/constants.dart';
+
 import '../models/moto.dart';
 import '../models/versement.dart';
 import '../models/depense.dart';
@@ -28,6 +30,7 @@ class PdfService {
     required CompteMoto compte,
     required List<Dette> dettes,
     required ({double rembourse, double reste})? Function(int? detteId) detteDe,
+    required Map<int, DateTime> derniersRemboursements,
   }) async {
     final doc = pw.Document();
     final aujourdHui = ScheduleService.aujourdHui();
@@ -68,7 +71,9 @@ class PdfService {
                 ligne.libelle,
                 _n(v.montantPrevu),
                 ligne.paye == null ? '-' : _n(ligne.paye!),
-                v.dateValidation != null ? formaterDate(v.dateValidation!) : '-',
+                dateDeLigne(v, derniersRemboursements) == null
+                    ? '-'
+                    : formaterDate(dateDeLigne(v, derniersRemboursements)!),
               ];
             }).toList(),
             cellStyle: const pw.TextStyle(fontSize: 9),
@@ -80,15 +85,17 @@ class PdfService {
             pw.Text('Dettes liees', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
             pw.SizedBox(height: 6),
             pw.Table.fromTextArray(
-              headers: ['Date', 'Motif', 'Montant', 'Rembourse', 'Reste'],
+              headers: ['Date', 'Motif', 'Montant', 'Rembourse', 'Reste', 'Rembourse le'],
               data: dettes.map((d) {
                 final etat = detteDe(d.id);
+                final le = derniersRemboursements[d.id];
                 return [
                   formaterDate(d.date),
                   d.notes ?? '-',
                   _n(d.montantInitial),
                   etat == null ? '-' : _n(etat.rembourse),
                   etat == null ? '-' : etat.reste <= 0 ? 'Rembourse' : _n(etat.reste),
+                  le == null ? '-' : formaterDate(le), // dernier remboursement
                 ];
               }).toList(),
               cellStyle: const pw.TextStyle(fontSize: 9),
@@ -196,6 +203,15 @@ class PdfService {
       bytes: await doc.save(),
       filename: 'rapport_general_${_formaterDateFichier(DateTime.now())}.pdf',
     );
+  }
+
+  /// Date a afficher pour une echeance : sa validation ; passee en dette, la
+  /// date du dernier remboursement de sa dette (null : pas encore rembourse).
+  static DateTime? dateDeLigne(Versement v, Map<int, DateTime> derniersRemboursements) {
+    if (v.statut == AppConstants.versementEnDette && v.detteId != null) {
+      return derniersRemboursements[v.detteId];
+    }
+    return v.dateValidation;
   }
 
   /// Nombre ecrit comme dans l'app ([formaterNombre]), avec une espace simple
