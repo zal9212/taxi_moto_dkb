@@ -8,7 +8,12 @@ import '../utils/formatters.dart';
 /// - souvent une faute de frappe (2027 au lieu de 2026). L'app les liste et
 /// demande une deuxieme confirmation. true : importer quand meme.
 Future<bool> confirmerDatesFutures(BuildContext context, String cheminFichier) async {
-  final lignes = await ExcelService.lignesDateeDansLeFutur(cheminFichier);
+  final List<({String feuille, int ligne, DateTime date})> lignes;
+  try {
+    lignes = await ExcelService.lignesDateeDansLeFutur(cheminFichier);
+  } catch (_) {
+    return true; // fichier illisible : l'import lui-meme affichera l'erreur
+  }
   if (lignes.isEmpty || !context.mounted) return true;
   final confirme = await showDialog<bool>(
     context: context,

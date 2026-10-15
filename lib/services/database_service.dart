@@ -411,10 +411,10 @@ class DatabaseService {
     ''');
   }
 
-  /// Tables du suivi des dettes personnelles, separe du systeme de
-  /// categories generique. [lien_type]/[lien_id] referencent
-  /// optionnellement une moto ou une entite de categorie (aucune
-  /// contrainte FOREIGN KEY stricte ici : la cible depend de lien_type).
+  /// Tables des dettes. [lien_type]/[lien_id] referencent optionnellement
+  /// une moto ou une entite de categorie (aucune contrainte FOREIGN KEY
+  /// stricte ici : la cible depend de lien_type). Une dette de boutique sort
+  /// du compte de sa personne ([gerant_id]), ses remboursements y reviennent.
   Future<void> _creerTablesDettes(Database db) async {
     await db.execute('''
       CREATE TABLE dettes (
@@ -1931,7 +1931,7 @@ class DatabaseService {
         l['id'] as int: (
           categorie: (l['categorie'] as String).toLowerCase(),
           entite: (l['entite'] as String).toLowerCase(),
-          gerant: (l['gerant'] as String?)?.toLowerCase(),
+          gerant: l['gerant'] as String?, // nom d'origine (recree tel quel)
         ),
     };
   }
@@ -1949,10 +1949,14 @@ class DatabaseService {
       );
       if (entite.isEmpty) continue;
       final entiteId = entite.first['id'] as int;
-      // La personne concernee, retrouvee par son nom (sinon le proprietaire).
-      final gerant = lien.value.gerant == null
-          ? null
-          : (await listerGerants(entiteId)).where((g) => g.nom.toLowerCase() == lien.value.gerant).firstOrNull?.id;
+      // La personne concernee, retrouvee par son nom - recreee si l'import ne
+      // l'a pas fait (un gerant qui n'a que des dettes, aucune operation).
+      final nom = lien.value.gerant;
+      int? gerant;
+      if (nom != null) {
+        gerant = (await listerGerants(entiteId)).where((g) => g.nom.toLowerCase() == nom.toLowerCase()).firstOrNull?.id ??
+            await insererGerant(CategorieGerant(entiteId: entiteId, nom: nom));
+      }
       await db.update(
         'dettes',
         {'lien_type': AppConstants.detteLienCategorieEntite, 'lien_id': entiteId, 'gerant_id': gerant},
@@ -2114,8 +2118,15 @@ class DatabaseService {
     return db.insert('dettes', d.toMap()..remove('id'));
   }
 
+  /// Une dette deja remboursee ne change plus de moto ni de boutique : ses
+  /// remboursements sont entres dans cette caisse, dans sa devise.
   Future<int> modifierDette(Dette d) async {
     final db = await database;
+    final avant = d.id == null ? null : await obtenirDette(d.id!);
+    final lienChange = avant != null && (avant.lienType != d.lienType || avant.lienId != d.lienId);
+    if (lienChange && (await listerRemboursements(d.id!)).isNotEmpty) {
+      throw StateError('Cette dette a deja des remboursements : sa moto ou sa boutique ne peut plus changer.');
+    }
     return db.update('dettes', d.toMap(), where: 'id = ?', whereArgs: [d.id]);
   }
 

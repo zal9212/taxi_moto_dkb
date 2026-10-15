@@ -1388,6 +1388,94 @@ void main() {
     }
   });
 
+  group('revue : la personne d\'une dette de boutique ne se perd jamais', () {
+    Future<({int categorie, int entite, int ali, int dette})> boutiqueAvecDetteDAli() async {
+      final categorie = await db.insererCategorieActivite(
+          CategorieActivite(nom: 'Boutiques', couleur: '#2D6CDF', deviseSymbole: 'FCFA'));
+      final entite = await db.insererEntiteCategorie(CategorieEntite(categorieId: categorie, nom: 'Madina'));
+      final ali = await db.insererGerant(CategorieGerant(entiteId: entite, nom: 'Ali')); // aucune operation
+      await db.insererTransactionCategorie(CategorieTransaction(
+          entiteId: entite, type: AppConstants.transactionRevenu, montant: 500000, date: DateTime(2026, 9, 1)));
+      final dette = await db.insererDette(Dette(
+          nomPersonne: 'Client', montantInitial: 100000, date: DateTime(2026, 9, 2),
+          lienType: AppConstants.detteLienCategorieEntite, lienId: entite, gerantId: ali));
+      await db.insererRemboursement(DetteRemboursement(detteId: dette, montant: 30000, date: DateTime(2026, 9, 5)));
+      return (categorie: categorie, entite: entite, ali: ali, dette: dette);
+    }
+
+    Future<String?> personneDeLaDette() async {
+      final d = (await db.listerDettes()).single;
+      if (d.gerantId == null || d.lienId == null) return null;
+      return (await db.listerGerants(d.lienId!)).where((g) => g.id == d.gerantId).firstOrNull?.nom;
+    }
+
+    Future<String> fichier(List<int> octets) async {
+      final dossier = await Directory.systemTemp.createTemp('revue3_test');
+      addTearDown(() => dossier.delete(recursive: true));
+      final chemin = '${dossier.path}/f.xlsx';
+      await File(chemin).writeAsBytes(octets);
+      return chemin;
+    }
+
+    test('import "tout remplacer" d\'une categorie : un gerant qui n\'a que des dettes est recree, sa dette reste a lui', () async {
+      final b = await boutiqueAvecDetteDAli();
+      final avant = await db.soldesParPersonne(b.entite);
+      final chemin = await fichier(await ExcelService.classeurCategorie((await db.obtenirCategorieActivite(b.categorie))!));
+
+      await ExcelService.importerCategorie(chemin, b.categorie, remplacementComplet: true);
+
+      expect(await personneDeLaDette(), 'Ali');
+      final entite = (await db.listerEntitesCategorie(b.categorie)).single.id!;
+      expect((await db.soldesParPersonne(entite)).values.toSet(), avant.values.toSet());
+    });
+
+    test('import des dettes en mise a jour : une colonne "Personne" vide garde la personne', () async {
+      await boutiqueAvecDetteDAli();
+      final excel = Excel.decodeBytes(await ExcelService.classeurComplet());
+      final feuille = excel['Dettes'];
+      for (var i = 1; i < feuille.maxRows; i++) {
+        feuille.updateCell(CellIndex.indexByColumnRow(columnIndex: 9, rowIndex: i), null);
+      }
+      final chemin = await fichier(excel.encode()!);
+
+      await ExcelService.importerDettes(chemin, remplacementComplet: false);
+
+      expect(await personneDeLaDette(), 'Ali');
+    });
+
+    test('une dette deja remboursee ne change plus de boutique (sa caisse et sa devise)', () async {
+      final b = await boutiqueAvecDetteDAli();
+      final autre = await db.insererEntiteCategorie(CategorieEntite(categorieId: b.categorie, nom: 'Kaloum'));
+      final d = (await db.listerDettes()).single;
+
+      await expectLater(
+          db.modifierDette(Dette(
+              id: d.id, nomPersonne: d.nomPersonne, montantInitial: d.montantInitial, date: d.date,
+              dateCreation: d.dateCreation, lienType: d.lienType, lienId: autre, gerantId: null)),
+          throwsStateError);
+      // Corriger son nom reste possible.
+      await db.modifierDette(Dette(
+          id: d.id, nomPersonne: 'Client corrige', montantInitial: d.montantInitial, date: d.date,
+          dateCreation: d.dateCreation, lienType: d.lienType, lienId: d.lienId, gerantId: d.gerantId));
+      expect((await db.listerDettes()).single.nomPersonne, 'Client corrige');
+    });
+
+    test('import complet "tout remplacer" d\'un ancien fichier sans feuille Dettes : les dettes restent a leur boutique', () async {
+      final b = await boutiqueAvecDetteDAli();
+      final soldeAvant = await db.soldeEntiteCategorie(b.entite);
+      final excel = Excel.decodeBytes(await ExcelService.classeurComplet());
+      excel.delete('Dettes');
+      excel.delete('Remboursements');
+      final chemin = await fichier(excel.encode()!);
+
+      await ExcelService.importer(chemin, remplacementComplet: true);
+
+      final entite = (await db.listerEntitesCategorie((await db.listerCategoriesActivite()).single.id!)).single.id!;
+      expect(await db.soldeEntiteCategorie(entite), soldeAvant);
+      expect(await personneDeLaDette(), 'Ali');
+    });
+  });
+
   group('echeance marquee en dette', () {
     Future<Versement> retard(int motoId, DateTime date) async {
       final id = await db.insererVersement(Versement(

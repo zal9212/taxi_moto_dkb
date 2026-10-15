@@ -112,12 +112,15 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
     final categories = await _db.listerCategoriesActivite();
     final params = await _db.obtenirParametres();
     final deEcheance = _modeEdition && await _db.detteVientDUneEcheance(widget.detteExistante!.id!);
+    final dejaRemboursee =
+        _modeEdition && (await _db.listerRemboursements(widget.detteExistante!.id!)).isNotEmpty;
     if (!mounted) return;
     setState(() {
       // Changer sa moto ou son montant ferait sortir ses remboursements de la
-      // caisse de la moto et fausserait la ligne de l'echeance.
+      // caisse de la moto et fausserait la ligne de l'echeance. Une dette
+      // deja remboursee garde aussi sa moto/boutique (caisse et devise).
       _deEcheance = deEcheance;
-      if (deEcheance) _lienFige = true;
+      if (deEcheance || dejaRemboursee) _lienFige = true;
       _motos = motos;
       _categories = categories;
       _deviseGlobale = params.deviseSymbole;

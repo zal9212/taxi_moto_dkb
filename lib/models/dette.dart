@@ -1,6 +1,6 @@
-/// Une dette : de l'argent qu'une personne doit a l'utilisateur, suivie
-/// independamment du systeme de categories generique. Peut optionnellement
-/// etre rattachee a une moto ou a une entite de categorie (via [lienType]
+/// Une dette : de l'argent qu'une personne doit a l'utilisateur. Peut
+/// optionnellement etre rattachee a une moto ou a une entite de categorie
+/// (une boutique : elle sort alors du compte de [gerantId]) (via [lienType]
 /// + [lienId]) quand la dette concerne cette activite precise (ex: le
 /// chauffeur d'une moto qui doit de l'argent en plus de ses versements) ;
 /// laissee sans lien pour un pret personnel sans rapport avec l'app.

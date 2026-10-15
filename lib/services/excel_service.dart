@@ -408,12 +408,16 @@ class ExcelService {
 
     final db = DatabaseService.instance;
 
+    var liensDettesBoutiques = <int, ({String categorie, String entite, String? gerant})>{};
     if (remplacementComplet) {
       await db.viderToutesLesDonnees();
       // Portee au contenu reellement present dans le fichier : un ancien
       // fichier sans ces feuilles ne doit pas effacer des categories/dettes
       // que l'utilisateur a creees depuis et qui n'y figurent pas.
       if (excel.tables[_feuilleCategories] != null) {
+        // Ancien fichier sans feuille Dettes : les dettes restent, leurs
+        // boutiques sont recreees -> on les y relie par le nom en fin d'import.
+        if (excel.tables[_feuilleDettes] == null) liensDettesBoutiques = await db.liensDettesEntites();
         await db.viderToutesLesCategoriesActivite();
       }
       if (excel.tables[_feuilleDettes] != null) {
@@ -1037,7 +1041,7 @@ class ExcelService {
             // base alors sur le lien) ; utile seulement pour une dette
             // independante, ou comme simple valeur inerte sinon.
             deviseSymbole: devise,
-            gerantId: await _gerantParNom(lienTypeFinal, lienIdFinal, _texte(_valeur(ligne, 9))),
+            gerantId: await _gerantDette(lienTypeFinal, lienIdFinal, _texte(_valeur(ligne, 9)), idFourni),
           );
 
           int idFinal;
@@ -1130,6 +1134,8 @@ class ExcelService {
     for (final motoId in idMotoParNom.values.toSet()) {
       await db.normaliser(motoId);
     }
+
+    await db.relierDettesAuxEntites(liensDettesBoutiques);
 
     return rapport;
   }
@@ -1509,7 +1515,7 @@ class ExcelService {
           // Sans effet si un lien est actif (deviseEffectiveDette() se base
           // alors sur le lien) ; utile seulement pour une dette independante.
           deviseSymbole: devise,
-          gerantId: await _gerantParNom(lienTypeFinal, lienIdFinal, _texte(_valeur(ligne, 9))),
+          gerantId: await _gerantDette(lienTypeFinal, lienIdFinal, _texte(_valeur(ligne, 9)), idFourni),
         );
 
         int idFinal;
@@ -1748,12 +1754,17 @@ class ExcelService {
 
   static String _iso(DateTime d) => d.toIso8601String().substring(0, 10);
 
-  /// Personne concernee par une dette de boutique, retrouvee par son nom
-  /// dans l'entite (colonne "Personne") ; proprietaire sinon.
-  static Future<int?> _gerantParNom(String? lienType, int? entiteId, String? nom) async {
-    if (lienType != AppConstants.detteLienCategorieEntite || entiteId == null || nom == null) return null;
-    final gerants = await DatabaseService.instance.listerGerants(entiteId);
-    return gerants.where((g) => g.nom.toLowerCase() == nom.trim().toLowerCase()).firstOrNull?.id;
+  /// Personne concernee par une dette de boutique (colonne "Personne") :
+  /// retrouvee par son nom dans l'entite, ou creee comme pour les operations
+  /// (un gerant qui n'a que des dettes). Cellule vide sur une dette deja en
+  /// base (ancien fichier, fichier retouche) : on garde sa personne actuelle.
+  static Future<int?> _gerantDette(String? lienType, int? entiteId, String? nom, int? idDette) async {
+    if (lienType != AppConstants.detteLienCategorieEntite || entiteId == null) return null;
+    if (nom == null) {
+      final existante = idDette == null ? null : await DatabaseService.instance.obtenirDette(idDette);
+      return existante != null && existante.lienId == entiteId ? existante.gerantId : null;
+    }
+    return _resoudreGerant(entiteId, nom, {});
   }
 
   /// Lignes d'argent datees apres aujourd'hui dans un fichier a importer

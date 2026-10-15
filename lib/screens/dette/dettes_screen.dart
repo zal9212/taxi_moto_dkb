@@ -11,7 +11,8 @@ import 'add_edit_dette_screen.dart';
 import 'dette_detail_screen.dart';
 
 /// Liste globale des dettes ("quelqu'un me doit de l'argent"), avec le
-/// total restant du. Suivi independant du systeme de categories generique.
+/// total restant du. Une dette de boutique compte aussi dans le solde de
+/// cette boutique (voir DatabaseService.dettesEntites).
 class DettesScreen extends StatefulWidget {
   const DettesScreen({super.key});
 

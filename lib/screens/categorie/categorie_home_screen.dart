@@ -159,6 +159,13 @@ class _CategorieHomeScreenState extends State<CategorieHomeScreen> {
                     ),
                   ],
                 ),
+                if (_totalDettes > 0) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                      'Dettes : -${formaterMontant(_totalDettes, devise)} accordees, '
+                      '+${formaterMontant(_totalRemboursements, devise)} remboursees',
+                      style: TextStyle(color: AppColors.texteGris, fontSize: 10)),
+                ],
               ],
             ),
           ),
