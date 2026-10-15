@@ -439,6 +439,22 @@ class DatabaseService {
 
   Future<int> modifierMoto(Moto moto) async {
     final db = await database;
+    final avant = moto.id == null ? null : await obtenirMoto(moto.id!);
+    // Mise en pause : une echeance dont le jour est deja arrive est une
+    // semaine travaillee - elle reste due (pas une semaine de pause).
+    if (avant?.statut == AppConstants.motoActive && moto.statut != AppConstants.motoActive) {
+      final aujourdHui = ScheduleService.aujourdHui();
+      await db.update(
+        'versements',
+        {'statut': AppConstants.versementEnRetard},
+        where: 'moto_id = ? AND statut = ? AND date_echeance < ?',
+        whereArgs: [
+          moto.id,
+          AppConstants.versementEnAttente,
+          DateTime(aujourdHui.year, aujourdHui.month, aujourdHui.day + 1).toIso8601String(),
+        ],
+      );
+    }
     return db.update('motos', moto.toMap(), where: 'id = ?', whereArgs: [moto.id]);
   }
 
@@ -622,6 +638,41 @@ class DatabaseService {
     final db = await database;
     return (await db.query('versements', columns: ['id'], where: 'dette_id = ?', whereArgs: [detteId], limit: 1))
         .isNotEmpty;
+  }
+
+  /// Journal des paiements d'une moto : chaque somme recue, a sa date, avec
+  /// son echeance (export Excel).
+  Future<List<({int versementId, double montant, DateTime date})>> journalPaiements(int motoId) async {
+    final db = await database;
+    final lignes = await db.query('paiements', where: 'moto_id = ?', whereArgs: [motoId], orderBy: 'date ASC, id ASC');
+    return [
+      for (final l in lignes)
+        (
+          versementId: l['versement_id'] as int,
+          montant: (l['montant'] as num).toDouble(),
+          date: DateTime.parse(l['date'] as String),
+        ),
+    ];
+  }
+
+  /// Remet le journal d'une echeance tel qu'il etait (import Excel) : chaque
+  /// somme a sa vraie date. Refuse si le total ne fait pas le montant paye de
+  /// l'echeance (le fichier se contredirait). Retourne true si remplace.
+  Future<bool> remplacerJournal(int versementId, List<({double montant, DateTime date})> sommes) async {
+    final db = await database;
+    return db.transaction((txn) async {
+      final maps = await txn.query('versements', where: 'id = ?', whereArgs: [versementId]);
+      if (maps.isEmpty) return false;
+      final v = Versement.fromMap(maps.first);
+      final total = sommes.fold<double>(0, (t, s) => t + s.montant);
+      if (total != ScheduleService.montantPaye(v)) return false;
+      await txn.delete('paiements', where: 'versement_id = ?', whereArgs: [versementId]);
+      for (final s in sommes) {
+        await txn.insert('paiements',
+            {'versement_id': versementId, 'moto_id': v.motoId, 'montant': s.montant, 'date': s.date.toIso8601String()});
+      }
+      return true;
+    });
   }
 
   /// Echeances passees en dette : id de l'echeance -> id de sa dette.

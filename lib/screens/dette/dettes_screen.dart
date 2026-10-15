@@ -5,6 +5,7 @@ import '../../core/theme.dart';
 import '../../models/dette.dart';
 import '../../services/database_service.dart';
 import '../../services/excel_service.dart';
+import '../../widgets/confirmation_dates_futures.dart';
 import '../../utils/formatters.dart';
 import 'add_edit_dette_screen.dart';
 import 'dette_detail_screen.dart';
@@ -125,6 +126,7 @@ class _DettesScreenState extends State<DettesScreen> {
       if (confirme != true || !mounted) return;
     }
 
+    if (!await confirmerDatesFutures(context, chemin) || !mounted) return;
     setState(() => _importEnCours = true);
     try {
       final rapport = await ExcelService.importerDettes(chemin, remplacementComplet: mode == 'remplacement');

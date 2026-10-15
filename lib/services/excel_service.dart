@@ -122,6 +122,7 @@ class ExcelService {
 
   static const _feuilleMotos = 'Motos';
   static const _feuilleVersements = 'Versements';
+  static const _feuillePaiements = 'Paiements';
   static const _feuilleDepenses = 'Depenses';
   static const _feuilleCategories = 'Categories';
   static const _feuilleCategorieEntites = 'CategorieEntites';
@@ -224,6 +225,29 @@ class ExcelService {
           TextCellValue(v.statut),
           v.notes != null ? TextCellValue(v.notes!) : null,
           v.detteId != null ? IntCellValue(v.detteId!) : null,
+        ]);
+      }
+    }
+
+    // Chaque somme recue a sa vraie date : sans cette feuille, une echeance
+    // payee en deux fois revenait datee d'un seul jour (statistiques faussees).
+    final sPaiements = excel[_feuillePaiements];
+    sPaiements.appendRow([
+      TextCellValue('Versement ID'),
+      TextCellValue('Moto ID'),
+      TextCellValue('Moto'),
+      TextCellValue('Montant'),
+      TextCellValue('Date'),
+    ]);
+    for (final m in motos) {
+      if (m.id == null) continue;
+      for (final p in await db.journalPaiements(m.id!)) {
+        sPaiements.appendRow([
+          IntCellValue(p.versementId),
+          IntCellValue(m.id!),
+          TextCellValue(m.nom),
+          DoubleCellValue(p.montant),
+          TextCellValue(p.date.toIso8601String()),
         ]);
       }
     }
@@ -514,6 +538,8 @@ class ExcelService {
     // Echeances "en dette" importees, a rattacher a leur dette une fois les
     // dettes importees.
     final liensDettes = <({int versementId, int? detteFichier})>[];
+    // ID d'echeance du fichier -> ID en base (feuille Paiements).
+    final idVersementFichierVersDb = <int, int>{};
     final sVersements = excel.tables[_feuilleVersements];
     if (sVersements != null) {
       for (var i = 1; i < sVersements.maxRows; i++) {
@@ -606,6 +632,8 @@ class ExcelService {
             idFinal = await db.insererVersement(versement);
             rapport.versementsCrees++;
           }
+          final idFichier = idTxte != null ? int.tryParse(idTxte) : null;
+          if (idFichier != null) idVersementFichierVersDb[idFichier] = idFinal;
           if (statut == AppConstants.versementEnDette) {
             // Colonne 10 : absente des anciens fichiers. Lien refait apres
             // l'import des dettes (leurs numeros changent).
@@ -613,6 +641,34 @@ class ExcelService {
           }
         } catch (e) {
           rapport.erreurs.add(LigneErreurImport(_feuilleVersements, numeroLigne, 'Erreur inattendue : $e'));
+        }
+      }
+    }
+
+    // Feuille Paiements (absente des anciens fichiers) : chaque echeance
+    // retrouve ses sommes a leur vraie date.
+    final sPaiements = excel.tables[_feuillePaiements];
+    if (sPaiements != null) {
+      final sommesParEcheance = <int, List<({double montant, DateTime date})>>{};
+      final premiereLigne = <int, int>{};
+      for (var i = 1; i < sPaiements.maxRows; i++) {
+        final ligne = sPaiements.rows[i];
+        if (_ligneVide(ligne)) continue;
+        final idFichier = int.tryParse(_texte(_valeur(ligne, 0)) ?? '');
+        final montant = _lireMontant(_texte(_valeur(ligne, 3)));
+        final date = DateTime.tryParse(_texte(_valeur(ligne, 4)) ?? '');
+        final idDb = idFichier != null ? idVersementFichierVersDb[idFichier] : null;
+        if (idDb == null || montant == null || date == null) {
+          rapport.erreurs.add(LigneErreurImport(_feuillePaiements, i + 1, 'Echeance, montant ou date invalide.'));
+          continue;
+        }
+        sommesParEcheance.putIfAbsent(idDb, () => []).add((montant: montant, date: date));
+        premiereLigne.putIfAbsent(idDb, () => i + 1);
+      }
+      for (final e in sommesParEcheance.entries) {
+        if (!await db.remplacerJournal(e.key, e.value)) {
+          rapport.erreurs.add(LigneErreurImport(_feuillePaiements, premiereLigne[e.key]!,
+              'Le total des paiements ne fait pas le montant paye de l\'echeance : dates non reprises.'));
         }
       }
     }
@@ -1672,6 +1728,34 @@ class ExcelService {
   }
 
   static String _iso(DateTime d) => d.toIso8601String().substring(0, 10);
+
+  /// Lignes d'argent datees apres aujourd'hui dans un fichier a importer
+  /// (paiements, remboursements, validations, depenses, operations) : l'ecran
+  /// les montre et demande une deuxieme confirmation avant d'importer.
+  static Future<List<({String feuille, int ligne, DateTime date})>> lignesDateeDansLeFutur(String cheminFichier) async {
+    final excel = Excel.decodeBytes(await File(cheminFichier).readAsBytes());
+    final aujourdHui = ScheduleService.aujourdHui();
+    final demain = DateTime(aujourdHui.year, aujourdHui.month, aujourdHui.day + 1);
+    // Feuille -> colonne de la date ou l'argent a bouge.
+    const colonnes = {
+      _feuillePaiements: 4,
+      _feuilleRemboursements: 4,
+      _feuilleVersements: 4,
+      _feuilleDepenses: 5,
+      _feuilleCategorieTransactions: 6,
+      _feuilleTransactions: 5,
+    };
+    final resultat = <({String feuille, int ligne, DateTime date})>[];
+    for (final c in colonnes.entries) {
+      final feuille = excel.tables[c.key];
+      if (feuille == null) continue;
+      for (var i = 1; i < feuille.maxRows; i++) {
+        final date = DateTime.tryParse(_texte(_valeur(feuille.rows[i], c.value)) ?? '');
+        if (date != null && !date.isBefore(demain)) resultat.add((feuille: c.key, ligne: i + 1, date: date));
+      }
+    }
+    return resultat;
+  }
 
   /// Montant d'une cellule : d'abord la regle de saisie de l'app
   /// ([lireMontant] : "10.000" ou "10 000" = 10 000, pas 10), sinon une

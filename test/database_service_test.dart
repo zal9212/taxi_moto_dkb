@@ -1167,6 +1167,168 @@ void main() {
     });
   });
 
+  test('moto suspendue le jour de son echeance : cette semaine reste due (la moto a travaille)', () async {
+    final aujourdHui = ScheduleService.aujourdHui();
+    var moto = (await db.obtenirMoto(await nouvelleMoto()))!;
+    await db.insererVersement(Versement(motoId: moto.id!, dateEcheance: aujourdHui, montantPrevu: 50000));
+    await db.insererVersement(Versement(
+        motoId: moto.id!, dateEcheance: DateTime(aujourdHui.year, aujourdHui.month, aujourdHui.day + 7), montantPrevu: 50000));
+
+    moto = moto.copyWith(statut: AppConstants.motoSuspendue);
+    await db.modifierMoto(moto);
+
+    // Due comme toute echeance : en retard a partir du lendemain, meme moto suspendue.
+    final demain = DateTime(aujourdHui.year, aujourdHui.month, aujourdHui.day + 1);
+    expect(ScheduleService.compte(moto, await db.listerVersementsParMoto(moto.id!), demain).retard, 50000,
+        reason: 'la semaine du jour reste due');
+    moto = moto.copyWith(statut: AppConstants.motoActive);
+    await db.modifierMoto(moto);
+    await db.redemarrerEcheancesApresReactivation(moto);
+    expect((await db.listerVersementsParMoto(moto.id!)).map((v) => v.dateEcheance), contains(aujourdHui),
+        reason: 'la reactivation ne la supprime pas');
+  });
+
+  test('Excel : un aller-retour garde chaque paiement a sa vraie date (feuille Paiements)', () async {
+    final moto = (await db.obtenirMoto(await nouvelleMoto()))!;
+    await db.insererVersement(Versement(
+        motoId: moto.id!, dateEcheance: DateTime(2026, 9, 21), montantPrevu: 50000, statut: AppConstants.versementEnRetard));
+    final v = (await db.listerVersementsParMoto(moto.id!)).single;
+    await db.ajouterPaiement(v.id!, 20000, date: DateTime(2026, 9, 25));
+    await db.ajouterPaiement(v.id!, 30000, date: DateTime(2026, 10, 2));
+    final dossier = await Directory.systemTemp.createTemp('journal_test');
+    addTearDown(() => dossier.delete(recursive: true));
+    final chemin = '${dossier.path}/export.xlsx';
+    await File(chemin).writeAsBytes(await ExcelService.classeurComplet());
+
+    final rapport = await ExcelService.importer(chemin, remplacementComplet: true);
+
+    expect(rapport.erreurs, isEmpty);
+    final id = (await db.listerMotos()).single.id!;
+    Future<double> mois(int m) =>
+        db.totalEncaisse(motoId: id, debut: DateTime(2026, m, 1), fin: DateTime(2026, m + 1, 0, 23, 59));
+    expect((await mois(9), await mois(10)), (20000, 30000));
+  });
+
+  test('Excel : les lignes datees dans le futur (paiement, remboursement, depense) sont signalees avant import', () async {
+    final moto = (await db.obtenirMoto(await nouvelleMoto()))!;
+    final futur = DateTime(2099, 1, 1);
+    final id = await db.insererVersement(Versement(
+        motoId: moto.id!, dateEcheance: DateTime(2026, 9, 21), montantPrevu: 50000, statut: AppConstants.versementEnRetard));
+    await db.ajouterPaiement(id, 50000, date: futur);
+    final detteId = await nouvelleDette(lienType: AppConstants.detteLienMoto, lienId: moto.id);
+    await db.insererRemboursement(DetteRemboursement(detteId: detteId, montant: 10000, date: futur));
+    final dossier = await Directory.systemTemp.createTemp('futur_test');
+    addTearDown(() => dossier.delete(recursive: true));
+    final chemin = '${dossier.path}/export.xlsx';
+    await File(chemin).writeAsBytes(await ExcelService.classeurComplet());
+
+    final futures = await ExcelService.lignesDateeDansLeFutur(chemin);
+
+    expect(futures.map((l) => l.feuille).toSet(), containsAll(['Paiements', 'Remboursements']));
+    expect(futures.every((l) => l.date == futur), isTrue);
+  });
+
+  test('invariants boutiques : chaque total (personne, boutique, categorie) dit la meme chose apres chaque operation', () async {
+    Future<int> categorie(String nom, String devise) =>
+        db.insererCategorieActivite(CategorieActivite(nom: nom, couleur: '#2D6CDF', deviseSymbole: devise));
+    final boutiques = await categorie('Boutiques', 'FCFA');
+    final taxis = await categorie('Taxis', 'GNF'); // autre devise : jamais melangee
+    final madina = await db.insererEntiteCategorie(CategorieEntite(categorieId: boutiques, nom: 'Madina'));
+    final kaloum = await db.insererEntiteCategorie(CategorieEntite(categorieId: boutiques, nom: 'Kaloum'));
+    final taxi = await db.insererEntiteCategorie(CategorieEntite(categorieId: taxis, nom: 'Taxi 1'));
+    final ibrahim = await db.insererGerant(CategorieGerant(entiteId: madina, nom: 'Ibrahim'));
+    final aissatou = await db.insererGerant(CategorieGerant(entiteId: madina, nom: 'Aissatou'));
+    Future<int> operation(int entite, String type, double montant, {int? gerant, int jour = 1}) =>
+        db.insererTransactionCategorie(CategorieTransaction(
+            entiteId: entite, type: type, montant: montant, date: DateTime(2026, 9, jour), gerantId: gerant));
+    const revenu = AppConstants.transactionRevenu;
+    const depense = AppConstants.transactionDepense;
+
+    /// Recalcul independant, ligne par ligne, a partir des operations.
+    double recalcul(List<CategorieTransaction> ops) =>
+        ops.fold(0, (t, o) => o.type == revenu ? t + o.montant : t - o.montant);
+
+    Future<void> verifier(String etape) async {
+      for (final c in [boutiques, taxis]) {
+        final entites = await db.listerEntitesCategorie(c);
+        expect(entites, isNotEmpty, reason: '$etape : le test doit verifier de vraies boutiques');
+        expect(await db.listerTransactionsCategorie(c), isNotEmpty, reason: '$etape : et de vraies operations');
+        var sommeBoutiques = 0.0;
+        for (final e in entites) {
+          final ops = await db.listerTransactionsEntite(e.id!);
+          final solde = await db.soldeEntiteCategorie(e.id!);
+          final parPersonne = await db.soldesParPersonne(e.id!);
+          // 1. Boutique = somme des personnes = recalcul de ses operations.
+          expect(solde, recalcul(ops), reason: '$etape : solde de ${e.nom}');
+          expect(parPersonne.values.fold<double>(0, (t, s) => t + s), solde, reason: '$etape : personnes de ${e.nom}');
+          for (final p in parPersonne.entries) {
+            expect(p.value, recalcul(ops.where((o) => o.gerantId == p.key).toList()),
+                reason: '$etape : compte ${p.key ?? 'proprietaire'} de ${e.nom}');
+          }
+          sommeBoutiques += solde;
+        }
+        // 2. Categorie = somme de ses boutiques = recalcul de toutes ses operations.
+        final totaux = await db.totauxCategorie(c);
+        final opsCategorie = await db.listerTransactionsCategorie(c);
+        expect(totaux.revenus - totaux.depenses, sommeBoutiques, reason: '$etape : total categorie $c');
+        expect(totaux.revenus - totaux.depenses, recalcul(opsCategorie), reason: '$etape : recalcul categorie $c');
+        // 3. Aucune operation d'une autre categorie (devises jamais melangees).
+        final idsEntites = entites.map((e) => e.id).toSet();
+        expect(opsCategorie.every((o) => idsEntites.contains(o.entiteId)), isTrue, reason: '$etape : devises melangees');
+      }
+    }
+
+    await operation(madina, revenu, 500000);
+    await operation(madina, depense, 120000, gerant: ibrahim, jour: 2);
+    await operation(madina, revenu, 300000, gerant: aissatou, jour: 3);
+    await operation(kaloum, revenu, 80000, jour: 4);
+    await operation(taxi, revenu, 1000000, jour: 5);
+    await verifier('operations de depart');
+
+    final aModifier = (await db.listerTransactionsEntite(madina)).firstWhere((o) => o.gerantId == ibrahim);
+    await db.modifierTransactionCategorie(CategorieTransaction(
+        id: aModifier.id, entiteId: madina, type: depense, montant: 150000, date: aModifier.date, gerantId: aissatou));
+    await verifier('operation corrigee (montant et personne)');
+
+    final aSupprimer = (await db.listerTransactionsEntite(kaloum)).single;
+    await db.supprimerTransactionCategorie(aSupprimer.id!);
+    await verifier('operation supprimee');
+
+    await expectLater(db.supprimerGerant(aissatou), throwsException); // elle a des operations
+    await db.modifierGerant(CategorieGerant(id: aissatou, entiteId: madina, nom: 'Aissatou', statut: AppConstants.motoArchivee));
+    await verifier('gerante archivee (ses operations restent comptees)');
+
+    final dossier = await Directory.systemTemp.createTemp('boutiques_test');
+    addTearDown(() => dossier.delete(recursive: true));
+    final avant = (await db.totauxCategorie(boutiques), await db.totauxCategorie(taxis));
+    final categorieBoutiques = (await db.obtenirCategorieActivite(boutiques))!;
+
+    final fichierCategorie = '${dossier.path}/categorie.xlsx';
+    await File(fichierCategorie).writeAsBytes(await ExcelService.classeurCategorie(categorieBoutiques));
+    await ExcelService.importerCategorie(fichierCategorie, boutiques, remplacementComplet: false);
+    await verifier('import Excel de la categorie en fusion');
+    expect((await db.totauxCategorie(boutiques), await db.totauxCategorie(taxis)), avant,
+        reason: 'une fusion du meme fichier ne double rien');
+
+    await ExcelService.importerCategorie(fichierCategorie, boutiques, remplacementComplet: true);
+    await verifier('import Excel de la categorie en remplacement');
+    expect(await db.totauxCategorie(boutiques), avant.$1);
+
+    final fichierComplet = '${dossier.path}/complet.xlsx';
+    await File(fichierComplet).writeAsBytes(await ExcelService.classeurComplet());
+    await ExcelService.importer(fichierComplet, remplacementComplet: true);
+    final apres = {
+      for (final c in await db.listerCategoriesActivite()) c.nom: await db.totauxCategorie(c.id!),
+    };
+    expect((apres['Boutiques'], apres['Taxis']), avant, reason: 'aller-retour Excel complet');
+    for (final c in await db.listerCategoriesActivite()) {
+      final entites = await db.listerEntitesCategorie(c.id!);
+      for (final e in entites) {
+        expect(await db.soldeEntiteCategorie(e.id!), recalcul(await db.listerTransactionsEntite(e.id!)));
+      }
+    }
+  });
+
   group('echeance marquee en dette', () {
     Future<Versement> retard(int motoId, DateTime date) async {
       final id = await db.insererVersement(Versement(

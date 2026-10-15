@@ -4,6 +4,7 @@ import '../../core/theme.dart';
 import '../../models/categorie_activite.dart';
 import '../../services/database_service.dart';
 import '../../services/excel_service.dart';
+import '../../widgets/confirmation_dates_futures.dart';
 import '../../utils/couleur_utils.dart';
 import '../home_screen.dart';
 import 'categorie_home_screen.dart';
@@ -157,6 +158,7 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
       if (confirme != true || !mounted) return;
     }
 
+    if (!await confirmerDatesFutures(context, chemin) || !mounted) return;
     setState(() => _importEnCoursId = c.id);
     try {
       final rapport = await ExcelService.importerCategorie(chemin, c.id!, remplacementComplet: mode == 'remplacement');

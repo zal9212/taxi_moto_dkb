@@ -7,6 +7,7 @@ import '../services/backup_service.dart';
 import '../services/database_service.dart';
 import '../services/auth_service.dart';
 import '../services/excel_service.dart';
+import '../widgets/confirmation_dates_futures.dart';
 import '../services/notification_service.dart';
 import '../services/pdf_service.dart';
 import '../services/schedule_service.dart';
@@ -373,6 +374,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (confirme != true || !mounted) return;
     }
 
+    if (!await confirmerDatesFutures(context, chemin) || !mounted) return;
     setState(() => _importExcelEnCours = true);
     try {
       final rapport = await ExcelService.importer(chemin, remplacementComplet: mode == 'remplacement');
