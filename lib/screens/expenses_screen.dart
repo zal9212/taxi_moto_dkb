@@ -33,7 +33,8 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
   }
 
   Future<void> _charger() async {
-    setState(() => _chargement = true);
+    // Roue plein ecran seulement au premier affichage : ensuite les chiffres
+    // se mettent a jour sur place (la page reste visible, sans attente).
     final motos = await _db.listerMotos();
     final depenses = await _db.listerDepensesRecentes(motoId: _filtreMotoId, limite: 200);
     // Total calcule en base : la liste n'affiche que les 200 dernieres

@@ -56,7 +56,8 @@ class _CategorieEntiteDetailScreenState extends State<CategorieEntiteDetailScree
   }
 
   Future<void> _charger() async {
-    setState(() => _chargement = true);
+    // Roue plein ecran seulement au premier affichage : ensuite les chiffres
+    // se mettent a jour sur place (la page reste visible, sans attente).
     final entite = await _db.obtenirEntiteCategorie(widget.entiteId);
     if (entite == null) {
       // Entite supprimee entre-temps (ex: lien depuis une dette vers une
@@ -66,16 +67,18 @@ class _CategorieEntiteDetailScreenState extends State<CategorieEntiteDetailScree
       return;
     }
     final transactions = await _db.listerTransactionsEntite(widget.entiteId);
-    final solde = await _db.soldeEntiteCategorie(widget.entiteId);
     final mouvementsDettes = await _db.dettesEntites(entiteId: widget.entiteId);
     final gerants = await _db.listerGerants(widget.entiteId);
     final soldesPersonnes = await _db.soldesParPersonne(widget.entiteId);
+    // Solde de la boutique = somme des comptes (comme soldeEntiteCategorie), sans relire.
+    final solde = soldesPersonnes.values.fold<double>(0, (t, s) => t + s);
     final avecAudio = await _db.transactionsAvecAudio(widget.entiteId);
     final dettes = await _db.listerDettesParLien(AppConstants.detteLienCategorieEntite, widget.entiteId);
-    _soldeParDette.clear();
-    for (final d in dettes) {
-      if (d.id != null) _soldeParDette[d.id!] = await _db.soldeDette(d.id!);
-    }
+    // Une seule lecture pour toutes les dettes (pas une par dette).
+    final soldes = await _db.soldesDettes();
+    _soldeParDette
+      ..clear()
+      ..addAll({for (final d in dettes) if (d.id != null) d.id!: soldes[d.id] ?? d.montantInitial});
 
     if (!mounted) return;
     setState(() {

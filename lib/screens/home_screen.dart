@@ -81,7 +81,29 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _charger() async {
+  /// Chargement en cours, et s'il faut recharger une fois de plus a la fin
+  /// (une demande arrivee pendant le chargement) : jamais deux a la fois.
+  Future<void>? _chargementEnCours;
+  bool _rechargerApres = false;
+
+  Future<void> _charger() {
+    if (_chargementEnCours != null) {
+      _rechargerApres = true;
+      return _chargementEnCours!;
+    }
+    return _chargementEnCours = () async {
+      try {
+        do {
+          _rechargerApres = false;
+          await _chargerUneFois();
+        } while (_rechargerApres && mounted);
+      } finally {
+        _chargementEnCours = null;
+      }
+    }();
+  }
+
+  Future<void> _chargerUneFois() async {
     await _db.actualiserRetards();
 
     final bornes = _bornesPeriode;
@@ -91,8 +113,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     // Garde la fenetre d'echeances a venir pleine pour chaque moto active
     // (versement recurrent et indefini) - toute modification (montant,
     // frequence...) se repercute donc immediatement sur tout le reste.
+    // Rappels deja programmes : lus une seule fois pour toutes les motos.
+    final rappels = await NotificationService.rappelsEnAttente();
     for (final m in motos.where((m) => m.statut == AppConstants.motoActive)) {
-      await NotificationService.assurerEcheancesEtRappels(m);
+      await NotificationService.assurerEcheancesEtRappels(m,
+          enAttente: rappels, delaiHeures: params.delaiNotificationHeures);
     }
     // Les motos hors service suivent les memes regles d'argent (doublons,
     // trop-payes) ; les actives le font dans assurerEcheances.
@@ -106,7 +131,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
     // Retard compte moto par moto : l'avance de l'une ne compense pas le
     // retard d'une autre ; une moto suspendue garde ses retards d'avant la pause.
-    final comptes = await _db.comptesMotos(motoId: _motoFiltreId);
+    // Une seule passe pour toutes les motos (retard/avance, prochain, encaisse).
+    final etats = await _db.etatsMotos();
+    final comptes = {
+      for (final e in etats.entries)
+        if (_motoFiltreId == null || e.key == _motoFiltreId) e.key: e.value.compte,
+    };
 
     final paiementsRecents = await _db.listerPaiementsRecents(
       motoId: _motoFiltreId,
@@ -126,7 +156,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       fin: bornes.fin,
       limite: 15,
     );
-    final infosMotos = await _chargerInfosMotos(motos);
+    final infosMotos = [
+      for (final m in motos)
+        if (m.id != null && etats[m.id] != null)
+          _MotoAvecInfos(
+              moto: m, totalVerse: etats[m.id]!.encaisse, compte: etats[m.id]!.compte, prochain: etats[m.id]!.prochain),
+    ];
 
     final motosParId = {for (final m in motos) m.id: m};
     final categories = {for (final c in await _db.listerCategories()) c.id: c};
@@ -211,8 +246,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       bottomNavigationBar: NavigationBar(
         selectedIndex: _ongletActif,
         onDestinationSelected: (i) {
+          final venaitDAilleurs = _ongletActif > 1;
           setState(() => _ongletActif = i);
-          _charger();
+          // Accueil et Motos montrent les memes donnees : on ne recharge qu'en y
+          // revenant depuis Depenses / Reglages (qui ont pu les changer).
+          if (i <= 1 && venaitDAilleurs) _charger();
         },
         backgroundColor: Colors.white,
         indicatorColor: AppColors.succesFond,
@@ -546,17 +584,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
-  Future<List<_MotoAvecInfos>> _chargerInfosMotos(List<Moto> motos) async {
-    final resultats = <_MotoAvecInfos>[];
-    for (final moto in motos) {
-      if (moto.id == null) continue;
-      final totalVerse = await _db.totalEncaisse(motoId: moto.id!);
-      final compte = await _db.compteMoto(motoId: moto.id!);
-      final prochain = await _db.prochainVersement(moto.id!);
-      resultats.add(_MotoAvecInfos(moto: moto, totalVerse: totalVerse, compte: compte, prochain: prochain));
-    }
-    return resultats;
-  }
 }
 
 class _ActiviteRecente {

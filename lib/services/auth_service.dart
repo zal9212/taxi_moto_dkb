@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:isolate';
 import 'dart:math';
 
 import 'package:crypto/crypto.dart';
@@ -56,7 +57,7 @@ class AuthService {
 
   static Future<void> definirPin(String pin) async {
     final sel = _genererSel();
-    final hash = _hacher(pin, sel);
+    final hash = await Isolate.run(() => _hacher(pin, sel)); // l'ecran ne fige pas
     await _storage.write(key: _cleSel, value: sel);
     await _storage.write(key: _clePinHash, value: hash);
     await _reinitialiserEchecs();
@@ -81,7 +82,7 @@ class AuthService {
     final hash = await _storage.read(key: _clePinHash);
     if (sel == null || hash == null) return false;
 
-    final correct = _hacher(pin, sel) == hash;
+    final correct = await Isolate.run(() => _hacher(pin, sel)) == hash; // l'ecran ne fige pas
     if (correct) {
       await _reinitialiserEchecs();
     } else {

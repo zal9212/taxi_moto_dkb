@@ -36,7 +36,8 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
   }
 
   Future<void> _charger() async {
-    setState(() => _chargement = true);
+    // Roue plein ecran seulement au premier affichage : ensuite les chiffres
+    // se mettent a jour sur place (la page reste visible, sans attente).
     final categories = await _db.listerCategoriesActivite();
     final params = await _db.obtenirParametres();
     if (!mounted) return;

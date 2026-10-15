@@ -245,8 +245,8 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
         // Avant la replanification : les echeances recreees prennent le
         // montant en vigueur a leur date, nouveau changement compris.
         if (montantChange) await _db.changerMontant(moto.id!, montantVersement, _montantDepuis);
+        // Les rappels suivent dans _planifierNotifications (seulement ce qui change).
         if (replanifier || reactivee) {
-          await _annulerRappelsNonPayes(moto.id!);
           if (replanifier) {
             await _db.replanifierEcheances(moto, depuisDateDebut: dateDebutChangee);
           } else {
@@ -283,18 +283,6 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
       ),
     );
     return confirme == true;
-  }
-
-  /// Annule les rappels des echeances non payees, qui vont etre recalculees.
-  Future<void> _annulerRappelsNonPayes(int motoId) async {
-    for (final v in await _db.listerVersementsParMoto(motoId)) {
-      if (v.statut == AppConstants.versementPaye || v.id == null) continue;
-      // Secondaire : un echec du plugin ne doit pas empecher la mise a jour
-      // des echeances (meme principe que la suppression d'une moto).
-      try {
-        await NotificationService.annulerRappel(v.id!);
-      } catch (_) {}
-    }
   }
 
   Future<void> _planifierNotifications(Moto moto) async {

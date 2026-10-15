@@ -56,29 +56,40 @@ class NotificationService {
     required Moto moto,
     required int delaiHeures,
   }) async {
-    if (versement.id == null) return;
-    final d = versement.dateEcheance;
-    final montant = formaterNombre(ScheduleService.resteDu(versement)); // ce qui reste a payer
-
-    await _programmer(
-      versement.id!, // id unique = id du versement, permet d'annuler facilement
-      'Versement a venir - ${moto.nom}',
-      'Echeance de $montant prevue le ${formaterDate(d)}',
-      d.subtract(Duration(hours: delaiHeures)),
-      _payload(moto),
-    );
-    await _programmer(
-      versement.id! + _decalageAlerteRetard,
-      'Versement non recu - ${moto.nom}',
-      '${moto.chauffeur} n\'a pas encore paye l\'echeance du ${formaterDate(d)} ($montant). '
-          'Pensez a relancer.',
-      DateTime(d.year, d.month, d.day + 1, 9),
-      _payload(moto),
-    );
+    for (final r in _rappelsDe(versement, moto, delaiHeures)) {
+      await _programmer(r);
+    }
   }
 
-  static Future<void> _programmer(int id, String titre, String texte, DateTime quand, String payload) async {
-    if (quand.isBefore(DateTime.now())) return; // déjà passé, on ignore
+  /// Les rappels a venir d'une echeance (deja passes : aucun). Seule
+  /// definition de leur texte et de leur heure.
+  static List<({int id, String titre, String texte, DateTime quand, String payload})> _rappelsDe(
+      Versement versement, Moto moto, int delaiHeures) {
+    if (versement.id == null) return const [];
+    final d = versement.dateEcheance;
+    final montant = formaterNombre(ScheduleService.resteDu(versement)); // ce qui reste a payer
+    final maintenant = DateTime.now();
+    return [
+      (
+        id: versement.id!, // id unique = id du versement, permet d'annuler facilement
+        titre: 'Versement a venir - ${moto.nom}',
+        texte: 'Echeance de $montant prevue le ${formaterDate(d)}',
+        quand: d.subtract(Duration(hours: delaiHeures)),
+        payload: _payload(moto),
+      ),
+      (
+        id: versement.id! + _decalageAlerteRetard,
+        titre: 'Versement non recu - ${moto.nom}',
+        texte: '${moto.chauffeur} n\'a pas encore paye l\'echeance du ${formaterDate(d)} ($montant). '
+            'Pensez a relancer.',
+        quand: DateTime(d.year, d.month, d.day + 1, 9),
+        payload: _payload(moto),
+      ),
+    ].where((r) => !r.quand.isBefore(maintenant)).toList();
+  }
+
+  static Future<void> _programmer(({int id, String titre, String texte, DateTime quand, String payload}) r) async {
+    final (:id, :titre, :texte, :quand, :payload) = r;
     const details = NotificationDetails(
       android: AndroidNotificationDetails(
         'rappels_versements',
@@ -109,34 +120,48 @@ class NotificationService {
     await _plugin.cancel(versementId + _decalageAlerteRetard);
   }
 
-  /// Synchronise les rappels d'une moto avec son statut actuel : programme
-  /// les rappels de ses echeances non payees si elle est active, les
-  /// annule sinon (suspendue/archivee = hors service, ne doit plus
-  /// notifier tant qu'elle n'est pas reactivee).
+  /// Rappels actuellement programmes sur le telephone (une seule lecture,
+  /// partagee par toutes les motos d'un chargement d'ecran).
+  static Future<List<PendingNotificationRequest>> rappelsEnAttente() async {
+    try {
+      return await _plugin.pendingNotificationRequests();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// Met les rappels d'une moto en accord avec ses echeances, en ne touchant
+  /// QU'A ce qui a change : chaque appel au systeme de notifications est
+  /// lent, tout annuler / reprogrammer a chaque ecran ralentissait l'app.
+  /// Seule une echeance avec un reste a payer (hors dette, moto active) a des
+  /// rappels : une semaine payee - meme par de l'argent deplace vers elle -,
+  /// en dette, ou supprimee (doublon, avance regroupee) n'en a plus.
   static Future<void> synchroniserRappelsMoto({
     required Moto moto,
     required List<Versement> versements,
     required int delaiHeures,
+    List<PendingNotificationRequest>? enAttente,
   }) async {
-    // Seule une echeance avec un reste a payer (hors dette, moto active) a un
-    // rappel : une semaine payee - meme par de l'argent deplace vers elle -,
-    // en dette, ou supprimee (doublon, avance regroupee) n'en a plus.
-    final aRappeler = moto.statut != AppConstants.motoActive
-        ? <Versement>[]
-        : versements
-            .where((v) => v.id != null && v.statut != AppConstants.versementEnDette && ScheduleService.resteDu(v) > 0)
-            .toList();
-    final gardes = aRappeler.map((v) => v.id!).toSet();
-    for (final v in versements) {
-      if (v.id != null && !gardes.contains(v.id)) await annulerRappel(v.id!);
-    }
-    for (final p in await _plugin.pendingNotificationRequests()) {
-      if (p.payload != _payload(moto)) continue;
+    final attendus = {
+      if (moto.statut == AppConstants.motoActive)
+        for (final v in versements)
+          if (v.statut != AppConstants.versementEnDette && ScheduleService.resteDu(v) > 0)
+            for (final r in _rappelsDe(v, moto, delaiHeures)) r.id: r,
+    };
+    // Rappels de cette moto deja programmes (anciens sans payload : par id).
+    final idsEcheances = {for (final v in versements) if (v.id != null) v.id!};
+    for (final p in enAttente ?? await rappelsEnAttente()) {
       final echeance = p.id >= _decalageAlerteRetard ? p.id - _decalageAlerteRetard : p.id;
-      if (!gardes.contains(echeance)) await _plugin.cancel(p.id);
+      if (p.payload != _payload(moto) && !idsEcheances.contains(echeance)) continue;
+      final attendu = attendus[p.id];
+      if (attendu == null) {
+        await _plugin.cancel(p.id); // plus rien a rappeler pour cette echeance
+      } else if (attendu.titre == p.title && attendu.texte == p.body) {
+        attendus.remove(p.id); // deja programme tel quel
+      }
     }
-    for (final v in aRappeler) {
-      await planifierRappel(versement: v, moto: moto, delaiHeures: delaiHeures);
+    for (final r in attendus.values) {
+      await _programmer(r); // nouveau, ou texte change (reste du) : remplace
     }
   }
 
@@ -147,18 +172,21 @@ class NotificationService {
   /// resynchronise ses rappels — à chaque fois : un paiement, une dette ou
   /// une normalisation (argent déplacé vers une semaine plus ancienne) change
   /// les échéances à rappeler, pas seulement leur création.
-  static Future<void> assurerEcheancesEtRappels(Moto moto) async {
+  /// [enAttente] / [delaiHeures] : lus une fois par l'ecran qui traite
+  /// plusieurs motos (accueil), sinon lus ici.
+  static Future<void> assurerEcheancesEtRappels(Moto moto,
+      {List<PendingNotificationRequest>? enAttente, int? delaiHeures}) async {
     final db = DatabaseService.instance;
     if (moto.id == null) return;
-    await db.assurerEcheances(moto);
+    final versements = await db.assurerEcheancesEtLister(moto);
     // Le rappel est secondaire : un echec du plugin de notifications ne
     // doit pas bloquer le chargement des ecrans qui appellent ceci.
     try {
-      final params = await db.obtenirParametres();
       await synchroniserRappelsMoto(
         moto: moto,
-        versements: await db.listerVersementsParMoto(moto.id!),
-        delaiHeures: params.delaiNotificationHeures,
+        versements: versements,
+        delaiHeures: delaiHeures ?? (await db.obtenirParametres()).delaiNotificationHeures,
+        enAttente: enAttente,
       );
     } catch (_) {}
   }
@@ -174,15 +202,9 @@ class NotificationService {
     for (final moto in motos) {
       if (moto.id == null) continue;
       final versements = await DatabaseService.instance.listerVersementsParMoto(moto.id!);
-      for (final v in versements) {
-        if (v.statut != AppConstants.versementPaye && v.statut != AppConstants.versementEnDette) {
-          await planifierRappel(
-            versement: v,
-            moto: moto,
-            delaiHeures: params.delaiNotificationHeures,
-          );
-        }
-      }
+      // Meme regle que synchroniserRappelsMoto (pas d'annulation : cancelAll ci-dessus).
+      await synchroniserRappelsMoto(
+          moto: moto, versements: versements, delaiHeures: params.delaiNotificationHeures, enAttente: const []);
     }
   }
 }

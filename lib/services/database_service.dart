@@ -144,6 +144,35 @@ class DatabaseService {
     await db.insert('devises', {'code': AppConstants.devisePardDefaut});
     await _creerTablePaiements(db);
     await _creerTableMontantsMoto(db);
+    await _creerIndex(db);
+  }
+
+  /// Index des recherches faites a chaque ecran (par moto, par entite, par
+  /// dette...) : sans eux, chaque lecture parcourait toute la table, et l'app
+  /// ralentissait a mesure que l'historique grandissait. Seulement sur les
+  /// tables presentes (anciennes bases partielles).
+  Future<void> _creerIndex(Database db) async {
+    final tables =
+        (await db.rawQuery("SELECT name FROM sqlite_master WHERE type = 'table'")).map((t) => t['name']).toSet();
+    const index = {
+      'versements': 'idx_versements_moto ON versements (moto_id, date_echeance)',
+      'paiements': 'idx_paiements_moto ON paiements (moto_id, date)',
+      'depenses': 'idx_depenses_moto ON depenses (moto_id)',
+      'dettes': 'idx_dettes_lien ON dettes (lien_type, lien_id)',
+      'dette_remboursements': 'idx_remboursements_dette ON dette_remboursements (dette_id)',
+      'categorie_entites': 'idx_entites_categorie ON categorie_entites (categorie_id)',
+      'categorie_transactions': 'idx_transactions_entite ON categorie_transactions (entite_id)',
+      'categorie_gerants': 'idx_gerants_entite ON categorie_gerants (entite_id)',
+    };
+    for (final i in index.entries) {
+      if (!tables.contains(i.key)) continue;
+      try {
+        await db.execute('CREATE INDEX IF NOT EXISTS ${i.value}');
+      } on DatabaseException {
+        // Une acceleration seulement : jamais un blocage de la mise a jour
+        // (colonne absente d'une tres vieille base partielle).
+      }
+    }
   }
 
   /// Historique des changements du montant de versement d'une moto (voir
@@ -307,6 +336,11 @@ class DatabaseService {
       if (tables.contains('dettes') && !colonnes.contains('gerant_id')) {
         await db.execute('ALTER TABLE dettes ADD COLUMN gerant_id INTEGER');
       }
+    }
+
+    if (oldVersion < 12) {
+      // v12 : index des recherches courantes (vitesse, aucune donnee changee).
+      await _creerIndex(db);
     }
   }
 
@@ -958,11 +992,45 @@ class DatabaseService {
   /// retards moto par moto — l'avance d'une moto ne compense pas le retard
   /// d'une autre. Une moto suspendue garde ses retards d'avant la pause (sa
   /// pause, elle, n'est jamais due : voir [ScheduleService.estDue]).
-  Future<Map<int, CompteMoto>> comptesMotos({int? motoId}) async {
+  Future<Map<int, CompteMoto>> comptesMotos({int? motoId}) async => {
+        for (final e in (await etatsMotos()).entries)
+          if (motoId == null || e.key == motoId) e.key: e.value.compte,
+      };
+
+  /// Etat de chaque moto en une passe (accueil, cartes) : retard et avance,
+  /// prochaine periode a payer, total encaisse. Memes calculs que
+  /// [compteMoto], [prochainVersement] et [totalEncaisse] (verifie par test),
+  /// en 4 lectures pour toutes les motos au lieu d'environ 8 par moto.
+  Future<Map<int, ({CompteMoto compte, ({DateTime date, String etat, double reste})? prochain, double encaisse})>>
+      etatsMotos() async {
+    final db = await database;
     final motos = await listerMotos();
+    final versements = <int, List<Versement>>{};
+    for (final l in await db.query('versements', orderBy: 'date_echeance DESC')) {
+      final v = Versement.fromMap(l);
+      versements.putIfAbsent(v.motoId, () => []).add(v);
+    }
+    Future<Map<int, double>> sommes(String sql, [List<Object?> args = const []]) async => {
+          for (final l in await db.rawQuery(sql, args)) l['moto'] as int: (l['total'] as num).toDouble(),
+        };
+    final paiements = await sommes('SELECT moto_id AS moto, COALESCE(SUM(montant), 0) AS total FROM paiements GROUP BY moto_id');
+    // Comme [totalRemboursementsMotos] : dettes liees a une moto encore existante.
+    final remboursements = await sommes(
+      'SELECT d.lien_id AS moto, COALESCE(SUM(r.montant), 0) AS total FROM dette_remboursements r '
+      'JOIN dettes d ON d.id = r.dette_id WHERE d.lien_type = ? AND d.lien_id IN (SELECT id FROM motos) '
+      'GROUP BY d.lien_id',
+      [AppConstants.detteLienMoto],
+    );
+    final aujourdHui = ScheduleService.aujourdHui();
     return {
       for (final m in motos)
-        if (motoId == null || m.id == motoId) m.id!: await compteMoto(motoId: m.id!),
+        if (m.id != null)
+          m.id!: (
+            compte: ScheduleService.compte(m, versements[m.id] ?? const [], aujourdHui),
+            prochain: ScheduleService.periodesAPayer(existants: versements[m.id] ?? const [], moto: m, aujourdHui: aujourdHui)
+                .firstOrNull,
+            encaisse: (paiements[m.id] ?? 0) + (remboursements[m.id] ?? 0),
+          ),
     };
   }
 
@@ -1057,10 +1125,18 @@ class DatabaseService {
     return resultat;
   }
 
-  Future<int> _assurerEcheances(Moto moto) async {
-    if (moto.id == null) return 0;
-    await _normaliser(moto.id!);
-    final existants = await listerVersementsParMoto(moto.id!); // tri date DESC
+  Future<int> _assurerEcheances(Moto moto) async => (await _assurerEtLister(moto)).crees;
+
+  /// [_assurerEcheances], et les echeances de la moto a jour (pour les
+  /// rappels, sans les relire).
+  Future<({int crees, List<Versement> versements})> _assurerEtLister(Moto moto) async {
+    if (moto.id == null) return (crees: 0, versements: <Versement>[]);
+    var existants = await listerVersementsParMoto(moto.id!); // tri date DESC
+    // Une seule lecture quand le compte est deja en regle (presque toujours).
+    if (_normalisationNecessaire(moto, existants.reversed.toList())) {
+      await _normaliser(moto.id!);
+      existants = await listerVersementsParMoto(moto.id!);
+    }
     final dates = ScheduleService.datesAGenerer(
       existants: existants,
       premiere: existants.isEmpty
@@ -1074,9 +1150,14 @@ class DatabaseService {
       valeur: moto.frequenceValeur,
       aujourdHui: ScheduleService.aujourdHui(),
     );
-    if (dates.isNotEmpty) await _insererVersements(await _nouvellesEcheances(moto, dates));
-    return dates.length;
+    if (dates.isEmpty) return (crees: 0, versements: existants);
+    await _insererVersements(await _nouvellesEcheances(moto, dates));
+    return (crees: dates.length, versements: await listerVersementsParMoto(moto.id!));
   }
+
+  /// Complete les echeances d'une moto et retourne toutes ses echeances a jour.
+  Future<List<Versement>> assurerEcheancesEtLister(Moto moto) =>
+      _enFile(() async => (await _assurerEtLister(moto)).versements);
 
   /// Applique une modification du plan d'une moto (date de début,
   /// fréquence ou jour) à ses échéances non payées — voir
@@ -1441,6 +1522,51 @@ class DatabaseService {
         await txn.delete('versements', where: 'id = ?', whereArgs: [l['id']]);
       }
     });
+  }
+
+  /// Meme examen que [_normaliser], sans rien ecrire : true des qu'une des
+  /// regles est a corriger (doublon, trop-paye, plus ancienne non soldee
+  /// avant une payee, echeances vides en trop). [lignes] : triees par date.
+  static bool _normalisationNecessaire(Moto moto, List<Versement> lignes) {
+    final aujourdHui = ScheduleService.aujourdHui();
+    // 1. Doublons.
+    if (moto.frequenceType != AppConstants.freqPersonnalisee) {
+      Versement? gardee;
+      for (final v in lignes) {
+        final aVenirVide = !v.dateEcheance.isBefore(aujourdHui) &&
+            v.statut == AppConstants.versementEnAttente &&
+            ScheduleService.montantPaye(v) == 0;
+        final doublon = gardee != null &&
+            (ScheduleService.memePeriode(gardee.dateEcheance, v.dateEcheance,
+                    type: AppConstants.freqHebdomadaire, valeur: DateTime.monday) ||
+                (aVenirVide &&
+                    ScheduleService.memePeriode(gardee.dateEcheance, v.dateEcheance,
+                        type: moto.frequenceType, valeur: moto.frequenceValeur)));
+        if (!doublon) {
+          gardee = v;
+        } else if (v.statut != AppConstants.versementEnDette) {
+          return true;
+        }
+      }
+    }
+    // 2. Trop-payes.
+    if (lignes.any((v) => v.statut == AppConstants.versementPaye && ScheduleService.montantPaye(v) > v.montantPrevu)) {
+      return true;
+    }
+    // 3. La plus ancienne d'abord.
+    final enPause = moto.statut != AppConstants.motoActive;
+    final comptees = lignes
+        .where((v) =>
+            v.statut != AppConstants.versementEnDette && !(enPause && v.statut == AppConstants.versementEnAttente))
+        .toList();
+    final premiereIncomplete = comptees.indexWhere((v) => ScheduleService.resteDu(v) > 0);
+    if (premiereIncomplete >= 0 && comptees.skip(premiereIncomplete + 1).any((v) => ScheduleService.montantPaye(v) > 0)) {
+      return true;
+    }
+    // 4. Echeances a venir vides au-dela de la fenetre.
+    final vides = lignes.where((v) =>
+        v.statut == AppConstants.versementEnAttente && v.montantPaye == null && !v.dateEcheance.isBefore(aujourdHui));
+    return vides.length > ScheduleService.fenetreEcheances;
   }
 
   /// Retire [montant] du journal d'une echeance, en commencant par les
@@ -2057,6 +2183,27 @@ class DatabaseService {
     final soldes = {for (final l in lignes) l['gerant_id'] as int?: (l['solde'] as num).toDouble()};
     for (final d in await dettesEntites(entiteId: entiteId)) {
       soldes[d.gerant] = (soldes[d.gerant] ?? 0) - d.accorde + d.rembourse;
+    }
+    return soldes;
+  }
+
+  /// Solde de chaque entite d'une categorie (accueil de la categorie) : meme
+  /// formule que [soldeEntiteCategorie] (operations, moins dettes accordees,
+  /// plus remboursements), en 2 lectures au lieu de 2 par entite. Une entite
+  /// sans mouvement est absente (solde 0).
+  Future<Map<int, double>> soldesEntitesCategorie(int categorieId) async {
+    final db = await database;
+    final soldes = {
+      for (final l in await db.rawQuery(
+        'SELECT ct.entite_id AS entite, COALESCE(SUM(CASE WHEN ct.type = ? THEN ct.montant ELSE -ct.montant END), 0) '
+        'AS solde FROM categorie_transactions ct WHERE ct.entite_id IN '
+        '(SELECT id FROM categorie_entites WHERE categorie_id = ?) GROUP BY ct.entite_id',
+        [AppConstants.transactionRevenu, categorieId],
+      ))
+        l['entite'] as int: (l['solde'] as num).toDouble(),
+    };
+    for (final d in await dettesEntites(categorieId: categorieId)) {
+      soldes[d.entite] = (soldes[d.entite] ?? 0) - d.accorde + d.rembourse;
     }
     return soldes;
   }

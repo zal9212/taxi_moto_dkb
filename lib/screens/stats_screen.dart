@@ -65,7 +65,8 @@ class _StatsScreenState extends State<StatsScreen> {
   }
 
   Future<void> _charger() async {
-    setState(() => _chargement = true);
+    // Roue plein ecran seulement au premier affichage : ensuite les chiffres
+    // se mettent a jour sur place (la page reste visible, sans attente).
     final motos = await _db.listerMotos();
     final params = await _db.obtenirParametres();
     final donnees = await _db.totalEncaisseParPeriode(

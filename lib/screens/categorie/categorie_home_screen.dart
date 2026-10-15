@@ -44,7 +44,8 @@ class _CategorieHomeScreenState extends State<CategorieHomeScreen> {
   }
 
   Future<void> _charger() async {
-    setState(() => _chargement = true);
+    // Roue plein ecran seulement au premier affichage : ensuite les chiffres
+    // se mettent a jour sur place (la page reste visible, sans attente).
     final categorie = await _db.obtenirCategorieActivite(widget.categorieId);
     if (categorie == null) {
       // Categorie supprimee entre-temps : repli sur le selecteur.
@@ -58,12 +59,11 @@ class _CategorieHomeScreenState extends State<CategorieHomeScreen> {
     }
     final entites = await _db.listerEntitesCategorie(widget.categorieId);
     final totaux = await _db.totauxCategorie(widget.categorieId);
-    _soldeParEntite.clear();
-    for (final e in entites) {
-      if (e.id != null) {
-        _soldeParEntite[e.id!] = await _db.soldeEntiteCategorie(e.id!);
-      }
-    }
+    // Une passe pour toutes les boutiques (pas 2 lectures par boutique).
+    final soldes = await _db.soldesEntitesCategorie(widget.categorieId);
+    _soldeParEntite
+      ..clear()
+      ..addAll(soldes);
     if (!mounted) return;
     setState(() {
       _categorie = categorie;

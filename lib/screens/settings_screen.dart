@@ -10,7 +10,6 @@ import '../services/excel_service.dart';
 import '../widgets/confirmation_dates_futures.dart';
 import '../services/notification_service.dart';
 import '../services/pdf_service.dart';
-import '../services/schedule_service.dart';
 import 'categorie/categories_screen.dart';
 import 'dette/dettes_screen.dart';
 import 'lock_screen.dart';
@@ -212,14 +211,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _generationRapportEnCours = true);
     try {
       final motos = await _db.listerMotos();
-      // Memes chiffres que la fiche de chaque moto.
-      final encaisseParMoto = <int, double>{};
-      final compteParMoto = <int, CompteMoto>{};
+      // Memes chiffres que la fiche de chaque moto, en une passe (etatsMotos).
+      final etats = await _db.etatsMotos();
+      final encaisseParMoto = {for (final e in etats.entries) e.key: e.value.encaisse};
+      final compteParMoto = {for (final e in etats.entries) e.key: e.value.compte};
       final depensesParMoto = <int, List<Depense>>{};
       for (final m in motos) {
         if (m.id == null) continue;
-        encaisseParMoto[m.id!] = await _db.totalEncaisse(motoId: m.id!);
-        compteParMoto[m.id!] = await _db.compteMoto(motoId: m.id!);
         depensesParMoto[m.id!] = await _db.listerDepensesParMoto(m.id!);
       }
       await PdfService.genererEtPartagerRapportGlobal(

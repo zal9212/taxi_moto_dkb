@@ -46,7 +46,8 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
   }
 
   Future<void> _charger() async {
-    setState(() => _chargement = true);
+    // Roue plein ecran seulement au premier affichage : ensuite les chiffres
+    // se mettent a jour sur place (la page reste visible, sans attente).
     final moto = await _db.obtenirMoto(widget.motoId);
     if (moto == null) {
       // Moto supprimee entre-temps (ex: lien depuis une dette vers une moto
@@ -66,13 +67,15 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     final changementsMontant = await _db.listerChangementsMontant(widget.motoId);
     final totalVerse = await _db.totalEncaisse(motoId: widget.motoId);
     final remboursementsDettes = await _db.totalRemboursementsMotos(motoId: widget.motoId);
-    final compte = await _db.compteMoto(motoId: widget.motoId);
+    // Meme calcul que compteMoto, sur les echeances deja lues (sans relire).
+    final compte = ScheduleService.compte(moto, versements, ScheduleService.aujourdHui());
     final params = await _db.obtenirParametres();
     final dettes = await _db.listerDettesParLien(AppConstants.detteLienMoto, widget.motoId);
-    _soldeParDette.clear();
-    for (final d in dettes) {
-      if (d.id != null) _soldeParDette[d.id!] = await _db.soldeDette(d.id!);
-    }
+    // Une seule lecture pour toutes les dettes (pas une par dette).
+    final soldes = await _db.soldesDettes();
+    _soldeParDette
+      ..clear()
+      ..addAll({for (final d in dettes) if (d.id != null) d.id!: soldes[d.id] ?? d.montantInitial});
 
     if (!mounted) return;
     setState(() {
@@ -193,8 +196,8 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
       return;
     }
     await _db.validerVersement(v.id!, montantPaye: montant);
-    if (v.id != null) await NotificationService.annulerRappel(v.id!);
-    // _charger() complete les echeances (et leurs rappels) si la moto est active.
+    // _charger() complete les echeances et met leurs rappels a jour (seulement
+    // ce qui change) si la moto est active.
     _charger();
     if (payeesDAbord && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
@@ -438,12 +441,7 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
       await _db.marquerEnDette(v, moto);
     }
     final affectations = await _db.encaisser(moto, montant, choisies: choisies);
-    // Les rappels des periodes soldees n'ont plus lieu d'etre.
-    for (final v in _versements) {
-      if (v.id != null && affectations.any((a) => a.date == ScheduleService.dateSeule(v.dateEcheance))) {
-        await NotificationService.annulerRappel(v.id!);
-      }
-    }
+    // _charger() met les rappels a jour (ceux des periodes soldees disparaissent).
     await _charger();
     if (!mounted) return;
     final resteDu = _compte.retard; // meme chiffre que la fiche et la relance
@@ -546,28 +544,22 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     );
     await _db.modifierMoto(motoMisAJour);
 
-    // Dans les deux sens, les rappels des echeances encore en attente
-    // (celles d'avant le changement de statut) n'ont plus lieu d'etre.
-    for (final v in _versements) {
-      if (v.statut != AppConstants.versementPaye && v.id != null) {
-        await NotificationService.annulerRappel(v.id!);
-      }
-    }
-
     if (!estActive) {
       // Reactivation apres une pause : la moto n'a pas travaille pendant
       // ce temps, les echeances tombees pendant la pause ne comptent pas
       // (les retards d'avant la pause restent dus) - on repart d'une
       // fenetre fraiche a partir d'aujourd'hui.
       await _db.redemarrerEcheancesApresReactivation(motoMisAJour);
-      final nouveauxVersements = await _db.listerVersementsParMoto(motoMisAJour.id!);
-      final params = await _db.obtenirParametres();
+    }
+    // Une seule mise a jour des rappels, seulement ce qui change : suspendue,
+    // ils disparaissent ; reactivee, ceux de la nouvelle fenetre arrivent.
+    try {
       await NotificationService.synchroniserRappelsMoto(
         moto: motoMisAJour,
-        versements: nouveauxVersements,
-        delaiHeures: params.delaiNotificationHeures,
+        versements: await _db.listerVersementsParMoto(motoMisAJour.id!),
+        delaiHeures: (await _db.obtenirParametres()).delaiNotificationHeures,
       );
-    }
+    } catch (_) {}
 
     _charger();
   }
@@ -596,16 +588,13 @@ class _MotoDetailScreenState extends State<MotoDetailScreen> {
     if (confirme != true || _moto?.id == null) return;
 
     try {
-      for (final v in _versements) {
-        if (v.id != null) {
-          // L'annulation du rappel est secondaire : si elle echoue (plugin
-          // de notifications), la suppression de la moto ne doit pas etre
-          // bloquee pour autant.
-          try {
-            await NotificationService.annulerRappel(v.id!);
-          } catch (_) {}
-        }
-      }
+      // Annule seulement ses rappels reellement programmes (une moto hors
+      // service n'en a plus). Secondaire : un echec du plugin ne bloque pas
+      // la suppression.
+      try {
+        await NotificationService.synchroniserRappelsMoto(
+            moto: _moto!.copyWith(statut: AppConstants.motoArchivee), versements: _versements, delaiHeures: 0);
+      } catch (_) {}
       await _db.supprimerMoto(_moto!.id!);
       if (!mounted) return;
       Navigator.pop(context);

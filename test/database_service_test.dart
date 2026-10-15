@@ -799,6 +799,40 @@ void main() {
     expect((await db.listerVersementsParMoto(moto.id!)).where((v) => v.dateEcheance == futureNonCreee).length, 1);
   });
 
+  test('accueil en une passe (etatsMotos) : exactement les chiffres de chaque fiche moto', () async {
+    final aujourdHui = ScheduleService.aujourdHui();
+    Future<Moto> moto(String nom, int jours) async => (await db.obtenirMoto(await db.insererMoto(Moto(
+          nom: nom,
+          chauffeur: 'C $nom',
+          montantVersement: 50000,
+          frequenceType: AppConstants.freqHebdomadaire,
+          frequenceValeur: DateTime.monday,
+          dateDebut: aujourdHui.subtract(Duration(days: jours)),
+        ))))!;
+    final a = await moto('A', 70);
+    final b = await moto('B', 40);
+    final c = await moto('C', 20);
+    for (final m in [a, b, c]) {
+      await db.assurerEcheances(m);
+    }
+    await db.encaisser(a, 120000);
+    await db.encaisser(b, 400000); // avance
+    final retardB = (await db.listerVersementsParMoto(c.id!)).lastWhere((v) => v.statut == AppConstants.versementEnRetard);
+    final dette = await db.marquerEnDette(retardB, c);
+    await db.insererRemboursement(DetteRemboursement(detteId: dette, montant: 20000, date: aujourdHui));
+    await db.modifierMoto(c.copyWith(statut: AppConstants.motoSuspendue));
+
+    final etats = await db.etatsMotos();
+
+    for (final m in [a, b, c]) {
+      final e = etats[m.id]!;
+      expect(e.compte, await db.compteMoto(motoId: m.id!), reason: m.nom);
+      expect(e.prochain, await db.prochainVersement(m.id!), reason: m.nom);
+      expect(e.encaisse, await db.totalEncaisse(motoId: m.id!), reason: m.nom);
+    }
+    expect(await db.comptesMotos(), {for (final m in [a, b, c]) m.id!: etats[m.id]!.compte});
+  });
+
   test('coherence : fiche, accueil et relance donnent le meme du apres changement de jour, paiement et dette', () async {
     var moto = (await db.obtenirMoto(await nouvelleMoto()))!;
     await db.assurerEcheances(moto);
@@ -1277,10 +1311,13 @@ void main() {
         expect(entites, isNotEmpty, reason: '$etape : le test doit verifier de vraies boutiques');
         expect(await db.listerTransactionsCategorie(c), isNotEmpty, reason: '$etape : et de vraies operations');
         var sommeBoutiques = 0.0;
+        final soldesEnUnePasse = await db.soldesEntitesCategorie(c);
         for (final e in entites) {
           final ops = await db.listerTransactionsEntite(e.id!);
           final solde = await db.soldeEntiteCategorie(e.id!);
           final parPersonne = await db.soldesParPersonne(e.id!);
+          // L'accueil de la categorie (une passe) dit la meme chose que la fiche.
+          expect(soldesEnUnePasse[e.id] ?? 0, solde, reason: '$etape : accueil categorie, ${e.nom}');
           final dettes = await effetDettes(e.id!);
           // 1. Boutique = somme des personnes = recalcul de ses operations, moins
           // les dettes accordees, plus leurs remboursements.

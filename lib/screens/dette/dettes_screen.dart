@@ -41,7 +41,8 @@ class _DettesScreenState extends State<DettesScreen> {
   }
 
   Future<void> _charger() async {
-    setState(() => _chargement = true);
+    // Roue plein ecran seulement au premier affichage : ensuite les chiffres
+    // se mettent a jour sur place (la page reste visible, sans attente).
     final dettes = await _db.listerDettes();
     final params = await _db.obtenirParametres();
     final soldes = await _db.soldesDettes();
