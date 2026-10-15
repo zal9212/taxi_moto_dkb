@@ -153,12 +153,12 @@ void main() {
       await echeance(9, 14, AppConstants.versementPaye, paye: 50000); // payee a l'ancien montant
       await echeance(9, 21, AppConstants.versementPaye); // ancien import : payee sans montant
       await echeance(9, 28, AppConstants.versementEnRetard);
-      await echeance(10, 5, AppConstants.versementEnDette); // la dette garde son montant
+      await echeance(10, 5, AppConstants.versementEnDette); // la dette suit aussi
       await echeance(10, 12, AppConstants.versementEnAttente);
 
-      expect(await db.changerMontant(motoId, 60000, DateTime(2026, 9, 14, 15, 30)), 4);
+      expect(await db.changerMontant(motoId, 60000, DateTime(2026, 9, 14, 15, 30)), 5);
 
-      expect(await montantsParJour(motoId), {7: 50000, 14: 60000, 21: 60000, 28: 60000, 5: 50000, 12: 60000});
+      expect(await montantsParJour(motoId), {7: 50000, 14: 60000, 21: 60000, 28: 60000, 5: 60000, 12: 60000});
       final parJour = {for (final v in await db.listerVersementsParMoto(motoId)) v.dateEcheance.day: v};
       // La plus ancienne d'abord : le 14/09 (passe a 60 000) est complete avec
       // l'argent du 21/09, le manque se retrouve sur la semaine la plus recente.
@@ -1054,6 +1054,24 @@ void main() {
       // L'argent garde sa date : le 20/09.
       expect(await db.totalEncaisse(motoId: moto.id!, debut: DateTime(2026, 9, 20), fin: DateTime(2026, 9, 20, 23)), 30000);
       expect((await db.compteMoto(motoId: moto.id!)).retard, 20000);
+    });
+
+    test('changer le montant met a jour la semaine passee en dette ; le deja rembourse reste acquis', () async {
+      final moto = (await db.obtenirMoto(await nouvelleMoto()))!;
+      await echeanceDe(moto.id!, DateTime(2026, 9, 14), paye: 10000);
+      final detteId = await db.marquerEnDette(await ligne(moto.id!, DateTime(2026, 9, 14)), moto); // 40 000
+      await db.insererRemboursement(DetteRemboursement(detteId: detteId, montant: 30000, date: DateTime(2026, 9, 20)));
+      final encaisse = await db.totalEncaisse(motoId: moto.id!);
+
+      await db.changerMontant(moto.id!, 80000, DateTime(2026, 9, 7));
+
+      expect((await ligne(moto.id!, DateTime(2026, 9, 14))).montantPrevu, 80000);
+      expect((await db.obtenirDette(detteId))!.montantInitial, 70000, reason: '80 000 - 10 000 deja paye');
+      expect((await db.soldesDettes())[detteId], 40000, reason: '70 000 - 30 000 deja rembourse');
+      expect(await db.totalEncaisse(motoId: moto.id!), encaisse);
+
+      await db.supprimerChangementMontant(moto.id!, DateTime(2026, 9, 7));
+      expect((await db.soldesDettes())[detteId], 10000);
     });
 
     test('valider une echeance deja payee en partie ajoute l\'argent, sans effacer le premier paiement', () async {

@@ -1248,8 +1248,9 @@ class DatabaseService {
   }
 
   /// Remet au montant en vigueur le jour [depuis] les echeances de la periode
-  /// qui commence ce jour-la et s'arrete au changement suivant. Les
-  /// echeances passees en dette ne bougent pas (la dette a son montant).
+  /// qui commence ce jour-la et s'arrete au changement suivant. Une echeance
+  /// passee en dette aussi : sa dette devient le nouveau montant moins ce qui
+  /// avait ete paye sur l'echeance ; ses remboursements restent acquis.
   Future<int> _reappliquerMontant(Transaction txn, int motoId, DateTime depuis) async {
     final jour = ScheduleService.dateSeule(depuis).toIso8601String();
     final montant = (await txn.rawQuery(
@@ -1265,21 +1266,22 @@ class DatabaseService {
       [motoId, jour],
     ))
         .first['depuis'] as String?;
+    final periode = 'moto_id = ? AND date_echeance >= ?${suivant != null ? ' AND date_echeance < ?' : ''}';
+    final argsPeriode = [motoId, jour, if (suivant != null) suivant];
+    await txn.rawUpdate(
+      'UPDATE dettes SET montant_initial = MAX(0, ? - COALESCE((SELECT v.montant_paye FROM versements v '
+      'WHERE v.dette_id = dettes.id), 0)) '
+      'WHERE id IN (SELECT dette_id FROM versements WHERE statut = ? AND $periode)',
+      [montant, AppConstants.versementEnDette, ...argsPeriode],
+    );
     // Payee sans montant enregistre (ancien import) = payee a l'ancien
     // montant : on le fige avant de changer montant_prevu.
     return txn.rawUpdate(
       'UPDATE versements SET '
       'montant_paye = COALESCE(montant_paye, CASE WHEN statut = ? THEN montant_prevu END), '
       'montant_prevu = ? '
-      'WHERE moto_id = ? AND statut != ? AND date_echeance >= ?${suivant != null ? ' AND date_echeance < ?' : ''}',
-      [
-        AppConstants.versementPaye,
-        montant,
-        motoId,
-        AppConstants.versementEnDette,
-        jour,
-        if (suivant != null) suivant,
-      ],
+      'WHERE $periode',
+      [AppConstants.versementPaye, montant, ...argsPeriode],
     );
   }
 

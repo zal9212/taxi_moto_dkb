@@ -230,7 +230,8 @@ class _AddEditMotoScreenState extends State<AddEditMotoScreen> {
               '${formaterDate(_montantDepuis)}'
               '${suivant == null ? '' : ', jusqu\'au ${formaterDate(suivant.depuis)} (changement deja prevu)'}. '
               'Les echeances de cette periode prennent ce montant, meme celles deja passees ou payees : '
-              'le solde sera recalcule. Les echeances d\'avant et les dettes ne changent pas.');
+              'le solde sera recalcule. Une semaine passee en dette aussi : le deja rembourse reste acquis, '
+              'le reste a rembourser suit le nouveau montant. Les echeances d\'avant ne changent pas.');
         }
         if (messages.isNotEmpty) {
           if (!mounted) return;
