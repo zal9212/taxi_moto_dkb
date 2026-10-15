@@ -4,6 +4,7 @@ import '../../core/constants.dart';
 import '../../core/theme.dart';
 import '../../models/categorie_activite.dart';
 import '../../models/categorie_entite.dart';
+import '../../models/categorie_gerant.dart';
 import '../../models/dette.dart';
 import '../../models/moto.dart';
 import '../../services/database_service.dart';
@@ -45,6 +46,9 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
   /// Dette nee d'une echeance : moto et montant fixes (voir
   /// [DatabaseService.detteVientDUneEcheance]).
   bool _deEcheance = false;
+  /// Dette de boutique : la personne concernee (null = proprietaire).
+  int? _gerantId;
+  List<CategorieGerant> _gerantsLien = [];
   String? _lienType;
   int? _lienId;
   String? _lienNom;
@@ -88,8 +92,10 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
     _lienId = d?.lienId ?? widget.lienIdInitial;
     _lienNom = widget.lienNomInitial;
     _lienFige = widget.lienTypeInitial != null;
+    _gerantId = d?.gerantId;
 
     _charger();
+    _chargerGerantsLien();
   }
 
   @override
@@ -188,6 +194,17 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
     setState(() => _entitesCategorieChoisie = entites);
   }
 
+  /// Gerants de la boutique liee (choix de la personne concernee).
+  Future<void> _chargerGerantsLien() async {
+    final entite = _lienType == AppConstants.detteLienCategorieEntite ? _lienId : null;
+    final gerants = entite == null ? <CategorieGerant>[] : await _db.listerGerants(entite);
+    if (!mounted) return;
+    setState(() {
+      _gerantsLien = gerants;
+      if (!gerants.any((g) => g.id == _gerantId)) _gerantId = null;
+    });
+  }
+
   Future<void> _enregistrer() async {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _enregistrement = true);
@@ -201,6 +218,7 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
         dateCreation: widget.detteExistante?.dateCreation,
         lienType: _lienId != null ? _lienType : null,
         lienId: _lienId,
+        gerantId: _lienType == AppConstants.detteLienCategorieEntite && _lienId != null ? _gerantId : null,
         // Sans effet des qu'un lien est actif (la devise vient alors de la
         // moto/entite liee) : n'a d'importance que pour une dette independante.
         // Normalisee ("fg " -> "FG") : sinon "FG" et "fg" donnaient deux
@@ -384,7 +402,13 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
                           items: _entitesCategorieChoisie
                               .map((e) => DropdownMenuItem(value: e.id, child: Text(e.nom, overflow: TextOverflow.ellipsis)))
                               .toList(),
-                          onChanged: (v) => setState(() => _lienId = v),
+                          onChanged: (v) {
+                            setState(() {
+                              _lienId = v;
+                              _gerantId = null;
+                            });
+                            _chargerGerantsLien();
+                          },
                         ),
                         if (_deviseLien != null) ...[
                           const SizedBox(height: 6),
@@ -392,6 +416,28 @@ class _AddEditDetteScreenState extends State<AddEditDetteScreen> {
                               style: TextStyle(color: AppColors.texteGris, fontSize: 10)),
                         ],
                       ],
+                    ],
+                    // Dette de boutique : elle sort du compte de cette personne,
+                    // ses remboursements y reviennent.
+                    if (_lienType == AppConstants.detteLienCategorieEntite && _lienId != null) ...[
+                      const SizedBox(height: 10),
+                      DropdownButtonFormField<int?>(
+                        key: ValueKey('personne-$_lienId-${_gerantsLien.length}'),
+                        isExpanded: true,
+                        initialValue: _gerantId,
+                        decoration: const InputDecoration(
+                          labelText: 'Personne concernee',
+                          helperText: 'La dette sort de son compte ; ses remboursements y reviennent',
+                          helperMaxLines: 2,
+                        ),
+                        items: [
+                          const DropdownMenuItem(value: null, child: Text(AppConstants.libelleProprietaire)),
+                          for (final g in _gerantsLien)
+                            if (g.statut == AppConstants.motoActive || g.id == _gerantId)
+                              DropdownMenuItem(value: g.id, child: Text(g.nom, overflow: TextOverflow.ellipsis)),
+                        ],
+                        onChanged: (v) => setState(() => _gerantId = v),
+                      ),
                     ],
                     const SizedBox(height: 24),
                     ElevatedButton(

@@ -37,7 +37,8 @@ class _CategorieEntiteDetailScreenState extends State<CategorieEntiteDetailScree
   List<Dette> _dettes = [];
   final Map<int, double> _soldeParDette = {};
   double _solde = 0;
-  /// Part du solde venant des remboursements de dettes liees a l'entite.
+  /// Dettes accordees par l'entite (sorties du solde) et ce qui en est revenu.
+  double _dettesAccordees = 0;
   double _remboursements = 0;
   List<CategorieGerant> _gerants = [];
   Map<int?, double> _soldesPersonnes = {};
@@ -66,7 +67,7 @@ class _CategorieEntiteDetailScreenState extends State<CategorieEntiteDetailScree
     }
     final transactions = await _db.listerTransactionsEntite(widget.entiteId);
     final solde = await _db.soldeEntiteCategorie(widget.entiteId);
-    final remboursements = (await _db.remboursementsEntites(entiteId: widget.entiteId))[widget.entiteId] ?? 0;
+    final mouvementsDettes = await _db.dettesEntites(entiteId: widget.entiteId);
     final gerants = await _db.listerGerants(widget.entiteId);
     final soldesPersonnes = await _db.soldesParPersonne(widget.entiteId);
     final avecAudio = await _db.transactionsAvecAudio(widget.entiteId);
@@ -81,7 +82,8 @@ class _CategorieEntiteDetailScreenState extends State<CategorieEntiteDetailScree
       _entite = entite;
       _transactions = transactions;
       _solde = solde;
-      _remboursements = remboursements;
+      _dettesAccordees = mouvementsDettes.fold(0.0, (t, d) => t + d.accorde);
+      _remboursements = mouvementsDettes.fold(0.0, (t, d) => t + d.rembourse);
       _gerants = gerants;
       _soldesPersonnes = soldesPersonnes;
       _avecAudio = avecAudio;
@@ -255,8 +257,10 @@ class _CategorieEntiteDetailScreenState extends State<CategorieEntiteDetailScree
                           color: _solde < 0 ? const Color(0xFFE2554A) : Colors.white,
                           fontSize: 22,
                           fontWeight: FontWeight.w600)),
-                  if (_remboursements > 0)
-                    Text('dont ${formaterMontant(_remboursements, devise)} de remboursements de dettes',
+                  if (_dettesAccordees > 0)
+                    Text(
+                        'Dettes : -${formaterMontant(_dettesAccordees, devise)} accordees, '
+                        '+${formaterMontant(_remboursements, devise)} remboursees',
                         style: TextStyle(color: AppColors.texteGris, fontSize: 10)),
                   const SizedBox(height: 14),
                   SizedBox(

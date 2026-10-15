@@ -23,6 +23,10 @@ class Dette {
   /// Devise propre a une dette SANS lien ; ignoree (et sans effet) si
   /// [lienType] est renseigne, la devise venant alors du lien.
   final String? deviseSymbole;
+  /// Dette liee a une entite (boutique) : la personne concernee - un gerant,
+  /// ou null pour le proprietaire. Le montant sort de son compte, ses
+  /// remboursements y reviennent.
+  final int? gerantId;
 
   Dette({
     this.id,
@@ -34,6 +38,7 @@ class Dette {
     this.lienType,
     this.lienId,
     this.deviseSymbole,
+    this.gerantId,
   }) : dateCreation = dateCreation ?? DateTime.now();
 
   Map<String, dynamic> toMap() {
@@ -47,6 +52,7 @@ class Dette {
       'lien_type': lienType,
       'lien_id': lienId,
       'devise_symbole': deviseSymbole,
+      'gerant_id': gerantId,
     };
   }
 
@@ -61,6 +67,7 @@ class Dette {
       lienType: map['lien_type'] as String?,
       lienId: map['lien_id'] as int?,
       deviseSymbole: map['devise_symbole'] as String?,
+      gerantId: map['gerant_id'] as int?,
     );
   }
 }

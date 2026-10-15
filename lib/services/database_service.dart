@@ -294,6 +294,20 @@ class DatabaseService {
             "UPDATE versements SET montant_paye = montant_prevu WHERE statut = 'paye' AND montant_paye IS NULL");
       }
     }
+
+    if (oldVersion < 11) {
+      // v11 : personne concernee par une dette de boutique (null =
+      // proprietaire, comme toutes les dettes d'avant).
+      final tables =
+          (await db.rawQuery("SELECT name FROM sqlite_master WHERE type = 'table'")).map((t) => t['name']).toSet();
+      // Une base tres ancienne recoit deja la colonne en creant la table plus haut.
+      final colonnes = tables.contains('dettes')
+          ? (await db.rawQuery('PRAGMA table_info(dettes)')).map((c) => c['name']).toSet()
+          : <Object?>{};
+      if (tables.contains('dettes') && !colonnes.contains('gerant_id')) {
+        await db.execute('ALTER TABLE dettes ADD COLUMN gerant_id INTEGER');
+      }
+    }
   }
 
   /// Gerants d'une entite et notes vocales des operations (crees dans
@@ -412,7 +426,8 @@ class DatabaseService {
         date_creation TEXT NOT NULL,
         lien_type TEXT,
         lien_id INTEGER,
-        devise_symbole TEXT
+        devise_symbole TEXT,
+        gerant_id INTEGER
       )
     ''');
 
@@ -1902,24 +1917,29 @@ class DatabaseService {
   /// Dettes liees aux entites (d'une categorie, ou de toutes) : id de la
   /// dette -> (categorie, entite) par leurs noms. A garder avant un import qui
   /// recree les entites (nouveaux numeros), pour les relier ensuite.
-  Future<Map<int, ({String categorie, String entite})>> liensDettesEntites({int? categorieId}) async {
+  Future<Map<int, ({String categorie, String entite, String? gerant})>> liensDettesEntites({int? categorieId}) async {
     final db = await database;
     final lignes = await db.rawQuery(
-      'SELECT d.id, c.nom AS categorie, e.nom AS entite FROM dettes d '
+      'SELECT d.id, c.nom AS categorie, e.nom AS entite, g.nom AS gerant FROM dettes d '
       'JOIN categorie_entites e ON e.id = d.lien_id JOIN categories_activite c ON c.id = e.categorie_id '
+      'LEFT JOIN categorie_gerants g ON g.id = d.gerant_id '
       'WHERE d.lien_type = ?${categorieId != null ? ' AND c.id = ?' : ''}',
       [AppConstants.detteLienCategorieEntite, if (categorieId != null) categorieId],
     );
     return {
       for (final l in lignes)
-        l['id'] as int: (categorie: (l['categorie'] as String).toLowerCase(), entite: (l['entite'] as String).toLowerCase()),
+        l['id'] as int: (
+          categorie: (l['categorie'] as String).toLowerCase(),
+          entite: (l['entite'] as String).toLowerCase(),
+          gerant: (l['gerant'] as String?)?.toLowerCase(),
+        ),
     };
   }
 
   /// Relie chaque dette a l'entite du meme nom (dans la categorie du meme
-  /// nom) apres un import : ses remboursements restent dans le solde de la
-  /// boutique. Une dette dont l'entite n'existe plus reste detachee.
-  Future<void> relierDettesAuxEntites(Map<int, ({String categorie, String entite})> liens) async {
+  /// nom), et a la meme personne, apres un import : elle reste dans le solde
+  /// de la boutique. Une dette dont l'entite n'existe plus reste detachee.
+  Future<void> relierDettesAuxEntites(Map<int, ({String categorie, String entite, String? gerant})> liens) async {
     final db = await database;
     for (final lien in liens.entries) {
       final entite = await db.rawQuery(
@@ -1928,9 +1948,14 @@ class DatabaseService {
         [lien.value.categorie, lien.value.entite],
       );
       if (entite.isEmpty) continue;
+      final entiteId = entite.first['id'] as int;
+      // La personne concernee, retrouvee par son nom (sinon le proprietaire).
+      final gerant = lien.value.gerant == null
+          ? null
+          : (await listerGerants(entiteId)).where((g) => g.nom.toLowerCase() == lien.value.gerant).firstOrNull?.id;
       await db.update(
         'dettes',
-        {'lien_type': AppConstants.detteLienCategorieEntite, 'lien_id': entite.first['id']},
+        {'lien_type': AppConstants.detteLienCategorieEntite, 'lien_id': entiteId, 'gerant_id': gerant},
         where: 'id = ? AND (lien_type IS NULL OR lien_type = ?)',
         whereArgs: [lien.key, AppConstants.detteLienCategorieEntite],
       );
@@ -1984,18 +2009,21 @@ class DatabaseService {
   /// du total general. Il faut alors l'archiver.
   Future<void> supprimerGerant(int id) async {
     final db = await database;
-    final operations = Sqflite.firstIntValue(
-        await db.rawQuery('SELECT COUNT(*) FROM categorie_transactions WHERE gerant_id = ?', [id]));
+    final operations = Sqflite.firstIntValue(await db.rawQuery(
+        'SELECT (SELECT COUNT(*) FROM categorie_transactions WHERE gerant_id = ?) + '
+        '(SELECT COUNT(*) FROM dettes WHERE gerant_id = ? AND lien_type = ?)',
+        [id, id, AppConstants.detteLienCategorieEntite]));
     if ((operations ?? 0) > 0) {
-      throw Exception('Ce gerant a des operations : archivez-le au lieu de le supprimer.');
+      throw Exception('Ce gerant a des operations ou des dettes : archivez-le au lieu de le supprimer.');
     }
     await db.delete('categorie_gerants', where: 'id = ?', whereArgs: [id]);
   }
 
   /// Solde de chaque personne de l'entite (ajouts moins sorties). Cle null =
-  /// le proprietaire, qui recoit aussi les remboursements des dettes liees a
-  /// l'entite (comme la caisse d'une moto). Seules les personnes ayant des
-  /// mouvements y figurent ; la somme des valeurs est [soldeEntiteCategorie].
+  /// le proprietaire. Une dette accordee par une personne sort de son compte,
+  /// ses remboursements y reviennent ([dettesEntites]). Seules les personnes
+  /// ayant des mouvements y figurent ; la somme des valeurs est
+  /// [soldeEntiteCategorie].
   Future<Map<int?, double>> soldesParPersonne(int entiteId) async {
     final db = await database;
     final lignes = await db.rawQuery(
@@ -2004,25 +2032,36 @@ class DatabaseService {
       [AppConstants.transactionRevenu, entiteId],
     );
     final soldes = {for (final l in lignes) l['gerant_id'] as int?: (l['solde'] as num).toDouble()};
-    final remboursements = (await remboursementsEntites(entiteId: entiteId))[entiteId] ?? 0;
-    if (remboursements > 0) soldes[null] = (soldes[null] ?? 0) + remboursements;
+    for (final d in await dettesEntites(entiteId: entiteId)) {
+      soldes[d.gerant] = (soldes[d.gerant] ?? 0) - d.accorde + d.rembourse;
+    }
     return soldes;
   }
 
-  /// Argent rembourse sur les dettes liees a chaque entite (id de l'entite ->
-  /// total), d'une entite ou de toute une categorie : il entre dans le solde
-  /// de l'entite, dans la devise de sa categorie.
-  Future<Map<int, double>> remboursementsEntites({int? entiteId, int? categorieId}) async {
+  /// Dettes liees aux entites, par entite et par personne (null =
+  /// proprietaire) : montant accorde (sorti de la boutique) et rembourse
+  /// (revenu). Seule formule des dettes d'une boutique ; d'une entite ou de
+  /// toute une categorie, dans la devise de sa categorie.
+  Future<List<({int entite, int? gerant, double accorde, double rembourse})>> dettesEntites(
+      {int? entiteId, int? categorieId}) async {
     final db = await database;
     final lignes = await db.rawQuery(
-      'SELECT d.lien_id AS entite, COALESCE(SUM(r.montant), 0) AS total '
-      'FROM dette_remboursements r JOIN dettes d ON d.id = r.dette_id '
-      'WHERE d.lien_type = ?${entiteId != null ? ' AND d.lien_id = ?' : ''}'
+      'SELECT d.lien_id AS entite, d.gerant_id AS gerant, SUM(d.montant_initial) AS accorde, '
+      'SUM(COALESCE((SELECT SUM(r.montant) FROM dette_remboursements r WHERE r.dette_id = d.id), 0)) AS rembourse '
+      'FROM dettes d WHERE d.lien_type = ?${entiteId != null ? ' AND d.lien_id = ?' : ''}'
       '${categorieId != null ? ' AND d.lien_id IN (SELECT id FROM categorie_entites WHERE categorie_id = ?)' : ''} '
-      'GROUP BY d.lien_id',
+      'GROUP BY d.lien_id, d.gerant_id',
       [AppConstants.detteLienCategorieEntite, if (entiteId != null) entiteId, if (categorieId != null) categorieId],
     );
-    return {for (final l in lignes) l['entite'] as int: (l['total'] as num).toDouble()};
+    return [
+      for (final l in lignes)
+        (
+          entite: l['entite'] as int,
+          gerant: l['gerant'] as int?,
+          accorde: (l['accorde'] as num).toDouble(),
+          rembourse: (l['rembourse'] as num).toDouble(),
+        ),
+    ];
   }
 
   // -- Agregats --
@@ -2034,9 +2073,11 @@ class DatabaseService {
 
   /// Totaux (revenus, depenses) sur l'ensemble d'une categorie, toutes
   /// entites confondues — pour le tableau de bord de la categorie.
-  /// [remboursements] : ceux des dettes liees a ses entites. Solde de la
-  /// categorie = revenus - depenses + remboursements = somme de ses entites.
-  Future<({double revenus, double depenses, double remboursements})> totauxCategorie(int categorieId) async {
+  /// [dettes] : accordees par ses entites (sorties) ; [remboursements] : ce
+  /// qui en est revenu. Solde de la categorie = revenus - depenses - dettes
+  /// + remboursements = somme de ses entites.
+  Future<({double revenus, double depenses, double dettes, double remboursements})> totauxCategorie(
+      int categorieId) async {
     final db = await database;
     final result = await db.rawQuery(
       "SELECT ct.type as type, COALESCE(SUM(ct.montant), 0) as total "
@@ -2055,10 +2096,13 @@ class DatabaseService {
         depenses = total;
       }
     }
-    final remboursements = (await remboursementsEntites(categorieId: categorieId))
-        .values
-        .fold<double>(0, (t, m) => t + m);
-    return (revenus: revenus, depenses: depenses, remboursements: remboursements);
+    final dettes = await dettesEntites(categorieId: categorieId);
+    return (
+      revenus: revenus,
+      depenses: depenses,
+      dettes: dettes.fold<double>(0, (t, d) => t + d.accorde),
+      remboursements: dettes.fold<double>(0, (t, d) => t + d.rembourse),
+    );
   }
 
   // ---------------------------------------------------------------------

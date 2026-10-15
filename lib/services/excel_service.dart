@@ -1037,6 +1037,7 @@ class ExcelService {
             // base alors sur le lien) ; utile seulement pour une dette
             // independante, ou comme simple valeur inerte sinon.
             deviseSymbole: devise,
+            gerantId: await _gerantParNom(lienTypeFinal, lienIdFinal, _texte(_valeur(ligne, 9))),
           );
 
           int idFinal;
@@ -1245,7 +1246,7 @@ class ExcelService {
     // du solde des boutiques.
     final liensDettes = remplacementComplet
         ? await db.liensDettesEntites(categorieId: categorieId)
-        : <int, ({String categorie, String entite})>{};
+        : <int, ({String categorie, String entite, String? gerant})>{};
     if (remplacementComplet) {
       await db.viderDonneesCategorie(categorieId);
     }
@@ -1508,6 +1509,7 @@ class ExcelService {
           // Sans effet si un lien est actif (deviseEffectiveDette() se base
           // alors sur le lien) ; utile seulement pour une dette independante.
           deviseSymbole: devise,
+          gerantId: await _gerantParNom(lienTypeFinal, lienIdFinal, _texte(_valeur(ligne, 9))),
         );
 
         int idFinal;
@@ -1626,6 +1628,8 @@ class ExcelService {
       // existantes) : un ancien fichier sans cette colonne reste
       // importable normalement, voir ExcelService._valeur().
       TextCellValue('Devise'),
+      // Dette de boutique : la personne concernee (son compte).
+      TextCellValue('Personne'),
     ]);
     for (final d in dettes) {
       String? lienNom;
@@ -1638,6 +1642,12 @@ class ExcelService {
       // Toujours la devise EFFECTIVE (celle du lien s'il y en a un), pour
       // que le fichier reflete ce que l'app affiche reellement.
       final devise = await db.deviseEffectiveDette(d);
+      String? personne;
+      if (d.lienType == AppConstants.detteLienCategorieEntite && d.lienId != null) {
+        personne = d.gerantId == null
+            ? AppConstants.libelleProprietaire
+            : (await db.listerGerants(d.lienId!)).where((g) => g.id == d.gerantId).firstOrNull?.nom;
+      }
       sDettes.appendRow([
         d.id != null ? IntCellValue(d.id!) : null,
         TextCellValue(d.nomPersonne),
@@ -1648,6 +1658,7 @@ class ExcelService {
         d.lienId != null ? IntCellValue(d.lienId!) : null,
         lienNom != null ? TextCellValue(lienNom) : null,
         TextCellValue(devise),
+        personne != null ? TextCellValue(personne) : null,
       ]);
     }
 
@@ -1736,6 +1747,14 @@ class ExcelService {
   }
 
   static String _iso(DateTime d) => d.toIso8601String().substring(0, 10);
+
+  /// Personne concernee par une dette de boutique, retrouvee par son nom
+  /// dans l'entite (colonne "Personne") ; proprietaire sinon.
+  static Future<int?> _gerantParNom(String? lienType, int? entiteId, String? nom) async {
+    if (lienType != AppConstants.detteLienCategorieEntite || entiteId == null || nom == null) return null;
+    final gerants = await DatabaseService.instance.listerGerants(entiteId);
+    return gerants.where((g) => g.nom.toLowerCase() == nom.trim().toLowerCase()).firstOrNull?.id;
+  }
 
   /// Lignes d'argent datees apres aujourd'hui dans un fichier a importer
   /// (paiements, remboursements, validations, depenses, operations) : l'ecran
