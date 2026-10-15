@@ -62,7 +62,8 @@ class _AddEditCategorieEntiteScreenState extends State<AddEditCategorieEntiteScr
       if (!mounted) return;
       setState(() => _enregistrement = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Erreur lors de l\'enregistrement : $e')),
+        // Message lisible (ex : nom deja pris dans la categorie).
+        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
       );
     }
   }

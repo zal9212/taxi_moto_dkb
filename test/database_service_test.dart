@@ -1476,6 +1476,24 @@ void main() {
     });
   });
 
+  test('deux boutiques d\'une meme categorie ne peuvent pas porter le meme nom', () async {
+    Future<int> categorie(String nom) =>
+        db.insererCategorieActivite(CategorieActivite(nom: nom, couleur: '#2D6CDF', deviseSymbole: 'FCFA'));
+    final boutiques = await categorie('Boutiques');
+    final taxis = await categorie('Taxis');
+    final madina = await db.insererEntiteCategorie(CategorieEntite(categorieId: boutiques, nom: 'Madina'));
+    final kaloum = await db.insererEntiteCategorie(CategorieEntite(categorieId: boutiques, nom: 'Kaloum'));
+
+    await expectLater(db.insererEntiteCategorie(CategorieEntite(categorieId: boutiques, nom: '  madina ')), throwsException);
+    await expectLater(db.modifierEntiteCategorie(CategorieEntite(id: kaloum, categorieId: boutiques, nom: 'MADINA')),
+        throwsException);
+    await expectLater(db.insererEntiteCategorie(CategorieEntite(categorieId: boutiques, nom: '   ')), throwsException);
+    // Garder son propre nom, ou le meme nom dans une autre categorie : permis.
+    await db.modifierEntiteCategorie(CategorieEntite(id: madina, categorieId: boutiques, nom: 'Madina'));
+    await db.insererEntiteCategorie(CategorieEntite(categorieId: taxis, nom: 'Madina'));
+    expect((await db.listerEntitesCategorie(boutiques)).map((e) => e.nom).toSet(), {'Madina', 'Kaloum'});
+  });
+
   group('echeance marquee en dette', () {
     Future<Versement> retard(int motoId, DateTime date) async {
       final id = await db.insererVersement(Versement(

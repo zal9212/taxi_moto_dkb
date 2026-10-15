@@ -1769,12 +1769,31 @@ class DatabaseService {
 
   Future<int> insererEntiteCategorie(CategorieEntite e) async {
     final db = await database;
-    return db.insert('categorie_entites', e.toMap()..remove('id'));
+    final nom = await _verifierNomEntite(db, e);
+    return db.insert('categorie_entites', (e.toMap()..remove('id'))..['nom'] = nom);
   }
 
   Future<int> modifierEntiteCategorie(CategorieEntite e) async {
     final db = await database;
-    return db.update('categorie_entites', e.toMap(), where: 'id = ?', whereArgs: [e.id]);
+    final nom = await _verifierNomEntite(db, e);
+    return db.update('categorie_entites', e.toMap()..['nom'] = nom, where: 'id = ?', whereArgs: [e.id]);
+  }
+
+  /// Nom nettoye, unique dans sa categorie (sans tenir compte des majuscules
+  /// ni des espaces) : deux boutiques du meme nom se confondraient - a l'ecran,
+  /// et a l'import Excel qui les retrouve par leur nom.
+  Future<String> _verifierNomEntite(Database db, CategorieEntite e) async {
+    final nom = e.nom.trim();
+    if (nom.isEmpty) throw Exception('Le nom est obligatoire.');
+    // Comparaison en Dart, comme pour les gerants (LOWER de SQLite ignore les accents).
+    final autres = await db.query('categorie_entites',
+        columns: ['nom'],
+        where: e.id == null ? 'categorie_id = ?' : 'categorie_id = ? AND id != ?',
+        whereArgs: [e.categorieId, if (e.id != null) e.id]);
+    if (autres.any((a) => (a['nom'] as String).trim().toLowerCase() == nom.toLowerCase())) {
+      throw Exception('"$nom" existe deja dans cette categorie : choisissez un autre nom.');
+    }
+    return nom;
   }
 
   /// Supprime une entite et tout son historique (transactions, valeurs de
